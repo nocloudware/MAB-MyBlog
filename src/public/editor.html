@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MAB-MyBlog Editor</title>
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#000000">
+    <link rel="stylesheet" href="/editor/assets/css/editor.css">
+    <script src="/editor/assets/js/markdown.js" type="module"></script>
+    <script src="/editor/assets/js/image.js" type="module"></script>
+    <script src="/editor/assets/js/editor.js" type="module"></script>
+    <script src="/editor/assets/js/publisher.js" type="module"></script>
+</head>
+<body>
+    <script type="module">
+        import { Editor } from '/editor/assets/js/editor.js';
+        import { Publisher } from '/editor/assets/js/publisher.js';
+
+        const editor = new Editor();
+        const publisher = new Publisher();
+
+        document.addEventListener('DOMContentLoaded', () => {
+            if (publisher.token) {
+                document.getElementById('login-form').style.display = 'none';
+                document.getElementById('editor-form').style.display = 'block';
+            } else {
+                document.getElementById('login-form').style.display = 'block';
+                document.getElementById('editor-form').style.display = 'none';
+            }
+        });
+
+        async function handleLogin(e) {
+            e.preventDefault();
+            const password = document.getElementById('login-password').value;
+            const success = await publisher.login(password);
+            if (success) {
+                document.getElementById('login-form').style.display = 'none';
+                document.getElementById('editor-form').style.display = 'block';
+            } else {
+                alert('Login failed');
+            }
+        }
+
+        async function createPost(e) {
+            e.preventDefault();
+            const title = document.getElementById('title').value;
+            const content = document.getElementById('content').value;
+            const image = document.getElementById('image').files[0];
+            const imageData = image ? await editor.handleImageUpload({ target: document.getElementById('image') }) : null;
+
+            const postData = {
+                title,
+                content
+            };
+
+            const result = await publisher.createPost(postData);
+            if (result.success) {
+                alert('Post created successfully!');
+                document.getElementById('title').value = '';
+                document.getElementById('content').value = '';
+                document.getElementById('image').value = '';
+                document.getElementById('image-preview').classList.remove('visible');
+            } else {
+                alert('Error creating post: ' + result.error);
+            }
+        }
+
+        window.handleLogin = handleLogin;
+        window.createPost = createPost;
+    </script>
+</body>
+</html>

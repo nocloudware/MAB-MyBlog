@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Minimalist blog editor">
+    <title>MAB-MyBlog Editor</title>
+    <link rel="manifest" href="/editor/manifest.json">
+    <link rel="icon" type="image/png" href="/assets/icons/icon-192.png">
+    <link rel="stylesheet" href="/editor/assets/css/editor.css">
+    <meta name="theme-color" content="#000000">
+</head>
+<body>
+    <div class="editor-container">
+        <header>
+            <h1>MAB-MyBlog</h1>
+            <p class="subtitle">Write. Save. Publish.</p>
+        </header>
+
+        <div id="login-form" class="login-form">
+            <h2>Login</h2>
+            <form onsubmit="handleLogin(event)">
+                <label for="login-password">Password</label>
+                <input type="password" id="login-password" name="password" placeholder="Enter admin password" required>
+                <button type="submit">Login</button>
+            </form>
+        </div>
+
+        <div id="editor-form" style="display: none;">
+            <form id="post-form" onsubmit="createPost(event)">
+                <div class="field-group">
+                    <label for="title">Title</label>
+                    <input type="text" id="title" name="title" placeholder="Article title" required>
+                </div>
+
+                <div class="field-group">
+                    <label for="content">Content (Markdown)</label>
+                    <div class="preview-toggle">
+                        <button type="button" id="preview-btn" onclick="window.editor.togglePreview()">Preview</button>
+                    </div>
+                    <textarea id="content" name="content" placeholder="Write your article in Markdown..." required></textarea>
+                    <div id="preview-pane" class="preview-pane"></div>
+                </div>
+
+                <div class="field-group">
+                    <label for="image">Featured Image</label>
+                    <input type="file" id="image" name="image" accept="image/*">
+                    <img id="image-preview" class="image-preview" alt="Preview">
+                </div>
+
+                <div class="btn-group">
+                    <button type="submit" class="btn-primary">Create Post</button>
+                    <button type="button" class="btn-secondary" onclick="publishToSocial()">Publish to Social</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script type="module">
+        import { Editor } from '/editor/assets/js/editor.js';
+        import { Publisher } from '/editor/assets/js/publisher.js';
+
+        window.editor = new Editor();
+        window.publisher = new Publisher();
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const loginForm = document.getElementById('login-form');
+            const editorForm = document.getElementById('editor-form');
+            if (window.publisher.token) {
+                loginForm.style.display = 'none';
+                editorForm.style.display = 'block';
+            } else {
+                loginForm.style.display = 'block';
+                editorForm.style.display = 'none';
+            }
+        });
+
+        async function handleLogin(e) {
+            e.preventDefault();
+            const password = document.getElementById('login-password').value;
+            const success = await window.publisher.login(password);
+            if (success) {
+                document.getElementById('login-form').style.display = 'none';
+                document.getElementById('editor-form').style.display = 'block';
+            } else {
+                alert('Login failed. Check your password.');
+            }
+        }
+
+        async function createPost(e) {
+            e.preventDefault();
+            if (!window.publisher.token) {
+                alert('Please login first');
+                return;
+            }
+
+            const title = document.getElementById('title').value;
+            const content = document.getElementById('content').value;
+            const fileInput = document.getElementById('image');
+            let image = null;
+
+            if (fileInput.files.length > 0) {
+                try {
+                    const webpBase64 = await window.editor.handleImageUpload({ target: fileInput });
+                    image = webpBase64;
+                } catch (err) {
+                    console.error('Image processing failed:', err);
+                }
+            }
+
+            const postData = { title, content };
+            if (image) postData.image = image;
+
+            const result = await window.publisher.createPost(postData);
+            if (result.success) {
+                alert('Post created successfully!');
+                document.getElementById('title').value = '';
+                document.getElementById('content').value = '';
+                document.getElementById('image').value = '';
+                document.getElementById('image-preview').classList.remove('visible');
+                document.getElementById('preview-pane').innerHTML = '';
+                document.getElementById('preview-btn').textContent = 'Preview';
+                document.getElementById('preview-btn').classList.remove('active');
+                document.getElementById('content').style.display = 'block';
+                document.getElementById('preview-pane').classList.remove('visible');
+            } else {
+                alert('Error creating post: ' + result.message);
+            }
+        }
+
+        async function publishToSocial() {
+            const slug = document.getElementById('slug')?.value || document.getElementById('title').value;
+            const platforms = ['bluesky', 'twitter'];
+            try {
+                const result = await window.publisher.publish(slug, platforms);
+                alert('Published to social media!');
+            } catch (err) {
+                alert('Error publishing: ' + err.message);
+            }
+        }
+
+        window.handleLogin = handleLogin;
+        window.createPost = createPost;
+        window.publishToSocial = publishToSocial;
+    </script>
+</body>
+</html>

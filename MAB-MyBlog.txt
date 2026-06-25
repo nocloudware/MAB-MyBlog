@@ -1,0 +1,487 @@
+# MAB-MyBlog - Documento de Diseño v3.0
+
+## Tu Imprenta Digital Autónoma · Edición Personal
+
+**Junio 2026**
+
+---
+
+> *"No te damos un blog. Te construimos el tuyo. En tu terreno. Con tus materiales. Y te llevas todas las llaves."*
+
+---
+
+## 1. VISIÓN GENERAL
+
+### 1.1 ¿Qué es MAB-MyBlog?
+
+MAB-MyBlog es un blog personal autónomo que se despliega en infraestructura propia (GitHub + Cloudflare). Todo el contenido se almacena como archivos Markdown en GitHub Releases. La base de datos D1 solo guarda el índice. Los Workers de Cloudflare renderizan el contenido al vuelo.
+
+### 1.2 Filosofía
+
+```
+MAB-MyBlog = Un blog que es 100% tuyo
+↓
+El contenido son archivos Markdown en TU GitHub
+↓
+Las imágenes son archivos WebP en TUS Releases
+↓
+El índice vive en TU base de datos D1
+↓
+El renderizado ocurre en TUS Workers
+↓
+Nadie puede censurarte, borrarte, ni espiarte
+```
+
+### 1.3 Características
+
+| Característica | Descripción |
+|----------------|-------------|
+| Editor PWA | Minimalista: título, texto Markdown, imagen principal |
+| Markdown nativo | Sin selectores de formato. Solo texto |
+| Una imagen por artículo | Funciona como OG image en redes sociales |
+| GitHub Releases | Cada artículo es un release con article.md + featured.webp + meta.json |
+| D1 como índice | Solo metadatos. El contenido vive en GitHub |
+| SSR | Renderizado al vuelo en Cloudflare Workers |
+| OG Tags | URLs absolutas para Twitter, Bluesky, WhatsApp, Facebook |
+| Versionado | Cada edición crea una nueva versión (nuevo release) |
+| Soft delete | Los artículos "eliminados" siguen en GitHub |
+| Bluesky | Publicación via App Password + link card |
+| Twitter/X | Publicación via OAuth 1.0a |
+| Standard.site | AT Protocol para descubribilidad |
+| Programación | Publicaciones programadas y recurrentes |
+| Hashtags automáticos | Por día de la semana |
+| Cifrado de tokens | AES-256-GCM en D1 |
+| Sin analytics | Sin tracking, sin cookies de terceros |
+
+---
+
+## 2. ARQUITECTURA
+
+### 2.1 Componentes
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    TU INFRAESTRUCTURA                     │
+│                                                          │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
+│  │  GitHub       │  │  Cloudflare   │  │  Cloudflare   │   │
+│  │  Releases     │  │  D1 (SQLite)  │  │  Workers      │   │
+│  │               │  │               │  │               │   │
+│  │  article.md   │  │  posts        │  │  API Worker   │   │
+│  │  featured.webp│  │  post_versions│  │  Renderer     │   │
+│  │  meta.json    │  │  social_tokens│  │  Scheduler    │   │
+│  │               │  │  schedules    │  │               │   │
+│  └──────────────┘  └──────────────┘  └──────────────┘   │
+│                                                          │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 2.2 Flujo de Publicación
+
+```
+Editor PWA → POST /api/posts
+↓
+[API Worker]
+↓                    ↓
+GitHub API           D1
+Crear Release        INSERT posts
+Subir assets         INSERT post_versions
+↓
+[Si hay redes configuradas]
+↓                    ↓
+Bluesky API          Twitter API
+createRecord         POST /2/tweets
+↓
+INSERT social_shares
+```
+
+### 2.3 Flujo de Lectura
+
+```
+Visitante → GET /post/mi-articulo
+↓
+[Renderer Worker]
+↓
+D1: Buscar slug → obtener release_url
+↓
+GitHub CDN: GET article.md (URL pública, sin token)
+↓
+Markdown → HTML
+↓
+Página completa con OG tags + Cache-Control
+```
+
+---
+
+## 3. STACK TECNOLÓGICO
+
+| Componente | Tecnología | Plan |
+|------------|------------|------|
+| Editor | HTML5 + Vanilla JS (PWA) | Cliente |
+| API | Cloudflare Workers (JS) | Gratuito |
+| SSR | Cloudflare Workers (JS) | Gratuito |
+| Programador | Cloudflare Cron Triggers | Gratuito |
+| Base de datos | Cloudflare D1 (SQLite) | 5 GB gratis |
+| Contenido | GitHub Releases | Ilimitado |
+| CDN | GitHub + Cloudflare | Gratuito |
+
+---
+
+## 4. ESTRUCTURA DEL PROYECTO
+
+```
+mab-myblog/
+├── src/
+│   ├── workers/
+│   │   ├── api/
+│   │   │   └── index.js          # Router + CRUD + Social + Schedule
+│   │   ├── renderer/
+│   │   │   └── index.js          # SSR del blog
+│   │   ├── scheduler/
+│   │   │   └── index.js          # Cron de publicaciones
+│   │   └── lib/
+│   │       ├── utils.js          # slugify, excerpt, formateo
+│   │       ├── crypto.js         # AES-256-GCM encrypt/decrypt
+│   │       ├── github.js         # Verificar token, crear repo
+│   │       ├── releases.js       # Crear releases con assets
+│   │       ├── markdown.js       # Markdown → HTML
+│   │       ├── bluesky.js        # Bluesky API + App Password
+│   │       ├── twitter.js        # Twitter API + OAuth 1.0a
+│   │       ├── atproto.js        # Standard.site records
+│   │       └── social-delete.js  # Borrar posts en redes
+│   │
+│   ├── editor/
+│   │   ├── index.html            # Editor PWA
+│   │   ├── sw.js                 # Service Worker
+│   │   ├── manifest.json         # PWA manifest
+│   │   └── assets/
+│   │       ├── css/
+│   │       │   └── editor.css
+│   │       └── js/
+│   │           ├── editor.js     # Lógica del editor
+│   │           ├── markdown.js   # Preview Markdown
+│   │           ├── image.js      # Procesamiento WebP
+│   │           └── publisher.js  # Comunicación con API
+│   │
+│   └── public/
+│       ├── index.html            # Portada del blog (SSR)
+│       └── editor.html           # Punto de entrada del editor
+│
+├── schema.sql                    # Esquema D1
+├── wrangler.toml                 # Config Cloudflare
+├── package.json
+└── README.md
+```
+
+---
+
+## 5. BASE DE DATOS
+
+```sql
+-- ========== POSTS (índice) ==========
+CREATE TABLE IF NOT EXISTS posts (
+    slug               TEXT PRIMARY KEY,
+    current_release_id TEXT NOT NULL,
+    current_version    INTEGER DEFAULT 1,
+    title              TEXT NOT NULL,
+    author             TEXT DEFAULT 'Author',
+    excerpt_cache      TEXT,
+    image_url_cache    TEXT,
+    status             TEXT DEFAULT 'published',
+    default_hashtags   TEXT DEFAULT '',
+    created_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at         DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ========== VERSIONES ==========
+CREATE TABLE IF NOT EXISTS post_versions (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug                TEXT NOT NULL,
+    version             INTEGER NOT NULL,
+    release_id          TEXT NOT NULL,
+    release_tag         TEXT NOT NULL,
+    release_url         TEXT NOT NULL,
+    article_url         TEXT NOT NULL,
+    image_url           TEXT,
+    meta_url            TEXT NOT NULL,
+    atproto_uri         TEXT,
+    excerpt             TEXT,
+    word_count          INTEGER DEFAULT 0,
+    reading_time        INTEGER DEFAULT 1,
+    change_description  TEXT,
+    created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (slug) REFERENCES posts(slug) ON DELETE CASCADE
+);
+
+-- ========== SOFT DELETE ==========
+CREATE TABLE IF NOT EXISTS post_deletions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug            TEXT NOT NULL,
+    deleted_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    reason          TEXT,
+    last_release_id TEXT,
+    FOREIGN KEY (slug) REFERENCES posts(slug) ON DELETE CASCADE
+);
+
+-- ========== TOKENS DE REDES SOCIALES (CIFRADOS) ==========
+CREATE TABLE IF NOT EXISTS social_tokens (
+    platform          TEXT PRIMARY KEY,
+    handle            TEXT,
+    encrypted_payload TEXT NOT NULL,
+    created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ========== REGISTRO DE PUBLICACIONES ==========
+CREATE TABLE IF NOT EXISTS social_shares (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_slug         TEXT NOT NULL,
+    platform          TEXT NOT NULL,
+    platform_post_id  TEXT,
+    platform_post_url TEXT,
+    status            TEXT DEFAULT 'published',
+    error_msg         TEXT,
+    shared_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (post_slug) REFERENCES posts(slug) ON DELETE CASCADE
+);
+
+-- ========== PROGRAMACIONES ==========
+CREATE TABLE IF NOT EXISTS publication_schedules (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_slug           TEXT NOT NULL,
+    name                TEXT,
+    schedule_type       TEXT DEFAULT 'once',
+    platforms           TEXT DEFAULT '[]',
+    message_template    TEXT,
+    custom_hashtags     TEXT DEFAULT '',
+    scheduled_at        DATETIME,
+    recurrence_interval INTEGER,
+    recurrence_unit     TEXT,
+    max_occurrences     INTEGER,
+    occurrence_count    INTEGER DEFAULT 0,
+    next_occurrence     DATETIME,
+    status              TEXT DEFAULT 'active',
+    created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (post_slug) REFERENCES posts(slug) ON DELETE CASCADE
+);
+
+-- ========== HISTORIAL ==========
+CREATE TABLE IF NOT EXISTS publication_history (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_slug         TEXT NOT NULL,
+    schedule_id       INTEGER,
+    platform          TEXT NOT NULL,
+    platform_post_id  TEXT,
+    message_used      TEXT,
+    published_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    status            TEXT DEFAULT 'success',
+    is_republish      INTEGER DEFAULT 0,
+    FOREIGN KEY (post_slug) REFERENCES posts(slug) ON DELETE CASCADE
+);
+
+-- ========== HASHTAGS ==========
+CREATE TABLE IF NOT EXISTS hashtag_templates (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    template    TEXT NOT NULL,
+    day_of_week INTEGER,
+    is_default  INTEGER DEFAULT 0,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ========== SETTINGS ==========
+CREATE TABLE IF NOT EXISTS settings (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ========== ÍNDICES ==========
+CREATE INDEX IF NOT EXISTS idx_posts_status ON posts(status);
+CREATE INDEX IF NOT EXISTS idx_posts_date ON posts(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_versions_slug ON post_versions(slug, version DESC);
+CREATE INDEX IF NOT EXISTS idx_schedules_next ON publication_schedules(next_occurrence);
+CREATE INDEX IF NOT EXISTS idx_schedules_status ON publication_schedules(status);
+CREATE INDEX IF NOT EXISTS idx_social_slug ON social_shares(post_slug);
+CREATE INDEX IF NOT EXISTS idx_history_slug ON publication_history(post_slug);
+
+-- ========== DATOS INICIALES ==========
+INSERT OR IGNORE INTO settings (key, value) VALUES
+    ('blog_name', 'My Blog'),
+    ('blog_description', 'An autonomous personal blog'),
+    ('author_name', 'Author'),
+    ('language', 'en');
+
+INSERT OR IGNORE INTO hashtag_templates (name, template, day_of_week, is_default) VALUES
+    ('Sunday', '#Sunday #Reading', 0, 1),
+    ('Monday', '#Monday #NewWeek #Motivation', 1, 1),
+    ('Tuesday', '#Tuesday #Coffee', 2, 1),
+    ('Wednesday', '#Wednesday #KeepGoing', 3, 1),
+    ('Thursday', '#Thursday #AlmostThere', 4, 1),
+    ('Friday', '#Friday #Weekend', 5, 1),
+    ('Saturday', '#Saturday #Relax #Reading', 6, 1);
+```
+
+---
+
+## 6. CONFIGURACIÓN
+
+### 6.1 wrangler.toml
+
+```toml
+name = "mab-myblog"
+main = "src/workers/api/index.js"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "mab-myblog-db"
+database_id = ""
+
+[triggers]
+crons = ["* * * * *"]
+
+[vars]
+BASE_URL = ""
+BLOG_NAME = "My Blog"
+BLOG_LANG = "en"
+```
+
+### 6.2 Secrets
+
+```bash
+wrangler secret put ADMIN_PASSWORD
+wrangler secret put JWT_SECRET
+wrangler secret put ENCRYPTION_KEY
+wrangler secret put GITHUB_TOKEN
+wrangler secret put GITHUB_USER
+wrangler secret put REPO_NAME
+```
+
+---
+
+## 7. PLAN DE IMPLEMENTACIÓN
+
+### 7.1 Orden de creación de archivos
+
+| # | Archivo | Descripción |
+|---|---------|-------------|
+| 1 | `package.json` | Dependencias |
+| 2 | `wrangler.toml` | Configuración Cloudflare |
+| 3 | `schema.sql` | Esquema de base de datos |
+| 4 | `src/workers/lib/utils.js` | Utilidades |
+| 5 | `src/workers/lib/crypto.js` | Cifrado AES-256-GCM |
+| 6 | `src/workers/lib/github.js` | Verificación de token |
+| 7 | `src/workers/lib/releases.js` | Creación de releases |
+| 8 | `src/workers/lib/markdown.js` | Markdown → HTML |
+| 9 | `src/workers/lib/bluesky.js` | API de Bluesky |
+| 10 | `src/workers/lib/twitter.js` | API de Twitter |
+| 11 | `src/workers/lib/atproto.js` | Standard.site |
+| 12 | `src/workers/lib/social-delete.js` | Borrado en redes |
+| 13 | `src/workers/api/index.js` | Worker principal |
+| 14 | `src/workers/renderer/index.js` | SSR |
+| 15 | `src/workers/scheduler/index.js` | Cron |
+| 16 | `src/editor/manifest.json` | PWA manifest |
+| 17 | `src/editor/sw.js` | Service Worker |
+| 18 | `src/editor/assets/js/markdown.js` | Preview cliente |
+| 19 | `src/editor/assets/js/image.js` | Procesamiento WebP |
+| 20 | `src/editor/assets/js/publisher.js` | Cliente API |
+| 21 | `src/editor/assets/css/editor.css` | Estilos |
+| 22 | `src/editor/assets/js/editor.js` | Lógica del editor |
+| 23 | `src/editor/index.html` | HTML del editor |
+| 24 | `src/public/index.html` | Entrada del blog |
+| 25 | `src/public/editor.html` | Entrada del editor |
+
+### 7.2 Fases
+
+| Fase | Archivos | Descripción |
+|------|----------|-------------|
+| 1. Fundación | 1-8 | Estructura, DB, utilidades, releases |
+| 2. Redes Sociales | 9-12 | Bluesky, Twitter, AT Protocol |
+| 3. API Worker | 13 | Router completo |
+| 4. Renderer | 14 | SSR del blog |
+| 5. Scheduler | 15 | Publicaciones programadas |
+| 6. Editor | 16-23 | PWA completa |
+| 7. Estáticos | 24-25 | Entradas del blog |
+
+---
+
+## 8. PLAN DE PRUEBAS
+
+### 8.1 Preparación
+
+1. Crear cuenta de GitHub
+2. Generar Personal Access Token (scope: `repo`)
+3. Crear repositorio privado
+4. Crear cuenta de Cloudflare
+5. Generar API Token (plantilla: Edit Cloudflare Workers)
+6. Crear base de datos D1: `wrangler d1 create mab-myblog-db`
+7. Ejecutar schema: `wrangler d1 execute mab-myblog-db --file=schema.sql`
+8. Configurar secrets
+9. Deploy: `wrangler deploy`
+
+### 8.2 Tests funcionales
+
+| # | Test | Resultado esperado |
+|---|------|-------------------|
+| 1 | GET `/api/posts` | `{"posts":[]}` |
+| 2 | Login con ADMIN_PASSWORD | `{"success":true}` + cookie |
+| 3 | Crear artículo sin imagen | `{"success":true, "slug":"..."}` |
+| 4 | Release en GitHub | Assets: article.md + meta.json |
+| 5 | GET `/post/slug` | HTML con OG tags |
+| 6 | Crear artículo con imagen | Assets: article.md + featured.webp + meta.json |
+| 7 | Editar artículo | v2 creada, v1 preservada |
+| 8 | Soft delete | 404 en actual, v1 accesible |
+| 9 | Conectar Bluesky | Token cifrado en D1 |
+| 10 | Publicar en Bluesky | Post con link card |
+| 11 | Conectar Twitter | Token cifrado en D1 |
+| 12 | Publicar en Twitter | Tweet con URL |
+| 13 | Programar publicación | Se ejecuta en el momento indicado |
+| 14 | Eliminar de redes | Posts borrados, artículo intacto |
+| 15 | Eliminar artículo + redes | Posts borrados + artículo en 404 |
+| 16 | `.well-known/site.standard.publication` | Devuelve AT-URI |
+
+---
+
+## 9. API REFERENCE
+
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| GET | `/api/posts` | Listar artículos |
+| POST | `/api/posts` | Crear artículo |
+| GET | `/api/posts/:slug` | Obtener artículo |
+| PUT | `/api/posts/:slug` | Actualizar artículo |
+| DELETE | `/api/posts/:slug` | Eliminar artículo |
+| POST | `/api/auth/login` | Iniciar sesión |
+| GET | `/api/auth/check` | Verificar sesión |
+| POST | `/api/publish` | Publicar en redes |
+| DELETE | `/api/publish` | Eliminar de redes |
+| POST | `/api/social/connect` | Conectar red social |
+| GET | `/api/social/status` | Estado de conexiones |
+| GET | `/api/schedule` | Listar programaciones |
+| POST | `/api/schedule` | Crear programación |
+| DELETE | `/api/schedule/:id` | Cancelar programación |
+| GET | `/api/hashtags` | Obtener plantillas |
+| GET | `/api/settings` | Obtener configuración |
+| PUT | `/api/settings` | Actualizar configuración |
+| GET | `/.well-known/site.standard.publication` | AT-URI |
+
+---
+
+## 10. PRÓXIMOS PASOS
+
+1. Crear los 25 archivos en el orden especificado
+2. Configurar secrets en Cloudflare
+3. Ejecutar schema en D1
+4. Deploy con `wrangler deploy`
+5. Ejecutar los 16 tests de validación
+6. Publicar el primer artículo real
+7. Conectar redes sociales
+8. Probar programación de publicaciones
+
+---
+
+**MAB-MyBlog v3.0 · Edición Personal · Junio 2026**
+
+*"Tu imprenta digital autónoma. Las llaves son tuyas."*
