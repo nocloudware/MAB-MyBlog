@@ -1,37 +1,19 @@
-const crypto = require('crypto');
-
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
-const IV_LENGTH = 16;
-
-if (!ENCRYPTION_KEY) {
-    throw new Error('ENCRYPTION_KEY environment variable is not set');
+async function getKey(env) {
+  const raw = new Uint8Array(env.ENCRYPTION_KEY.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+  return crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
 }
 
-function encrypt(text) {
-    const iv = crypto.randomBytes(IV_LENGTH);
-    const cipher = crypto.createCipheriv('aes-256-gcm', Buffer.from(ENCRYPTION_KEY, 'hex'), iv);
-    let encrypted = cipher.update(text, 'utf8', 'hex');
-    encrypted += cipher.final('hex');
-    const authTag = cipher.getAuthTag().toString('hex');
-    return `${iv.toString('hex')}:${encrypted}:${authTag}`;
+export async function encrypt(plaintext, env) {
+  const key = await getKey(env);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const enc = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(plaintext));
+  const combined = new Uint8Array([...iv, ...new Uint8Array(enc)]);
+  return btoa(Array.from(combined).map(b => String.fromCharCode(b)).join(''));
 }
 
-function decrypt(encryptedText) {
-    const parts = encryptedText.split(':');
-    if (parts.length !== 3) {
-        throw new Error('Invalid encrypted text format');
-    }
-    const iv = Buffer.from(parts[0], 'hex');
-    const encrypted = parts[1];
-    const authTag = Buffer.from(parts[2], 'hex');
-    const decipher = crypto.createDecipheriv('aes-256-gcm', Buffer.from(ENCRYPTION_KEY, 'hex'), iv);
-    decipher.setAuthTag(authTag);
-    let decrypted = decipher.update(encrypted, 'hex', 'utf8');
-    decrypted += decipher.final('utf8');
-    return decrypted;
+export async function decrypt(ciphertext, env) {
+  const key = await getKey(env);
+  const bytes = Uint8Array.from(atob(ciphertext), c => c.charCodeAt(0));
+  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: bytes.slice(0, 12) }, key, bytes.slice(12));
+  return new TextDecoder().decode(plain);
 }
-
-module.exports = {
-    encrypt,
-    decrypt
-};

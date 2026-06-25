@@ -1,87 +1,40 @@
-const { octokit } = require('./github');
-const { generateReleaseTag, generateReleaseName } = require('./utils');
+export async function createGitHubRelease(tagName, name, assets, env) {
+  const { GITHUB_USER, REPO_NAME, GITHUB_TOKEN } = env;
+  const base = `https://api.github.com/repos/${GITHUB_USER}/${REPO_NAME}`;
+  const auth = { 'Authorization': `token ${GITHUB_TOKEN}`, 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'MAB-MyBlog' };
 
-const GITHUB_USER = process.env.GITHUB_USER;
-const REPO_NAME = process.env.REPO_NAME;
+  let release;
+  const createRes = await fetch(`${base}/releases`, {
+    method: 'POST',
+    headers: { ...auth, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tag_name: tagName, name, body: `Article: ${name}`, draft: false, prerelease: false })
+  });
 
-async function createRelease(slug, version, title, content, image, meta) {
-    const tagName = generateReleaseTag(slug, version);
-    const releaseName = generateReleaseName(title, version);
+  if (!createRes.ok) {
+    const err = await createRes.json();
+    if (err.errors?.some(e => e.code === 'already_exists')) {
+      const existing = await fetch(`${base}/releases/tags/${tagName}`, { headers: auth });
+      if (existing.ok) {
+        release = await existing.json();
+        for (const a of release.assets) {
+          await fetch(`${base}/releases/assets/${a.id}`, { method: 'DELETE', headers: auth });
+        }
+      } else throw new Error('Failed to get existing release');
+    } else throw new Error(`Release failed: ${JSON.stringify(err)}`);
+  } else {
+    release = await createRes.json();
+  }
 
-    const releaseResponse = await octokit.rest.repos.createRelease({
-        owner: GITHUB_USER,
-        repo: REPO_NAME,
-        tag_name: tagName,
-        name: releaseName,
-        body: `Version ${version} of ${title}`,
-        draft: false,
-        prerelease: false
+  for (const asset of assets) {
+    const uploadUrl = release.upload_url.replace('{?name,label}', `?name=${encodeURIComponent(asset.name)}`);
+    const body = typeof asset.content === 'string' ? asset.content : asset.content;
+    await fetch(uploadUrl, {
+      method: 'POST',
+      headers: { ...auth, 'Content-Type': asset.content_type },
+      body
     });
+  }
 
-    const releaseId = releaseResponse.data.id;
-
-    // Upload article.md
-    await octokit.rest.repos.uploadReleaseAsset({
-        owner: GITHUB_USER,
-        repo: REPO_NAME,
-        release_id: releaseId,
-        name: 'article.md',
-        data: Buffer.from(content, 'utf-8')
-    });
-
-    // Upload meta.json
-    await octokit.rest.repos.uploadReleaseAsset({
-        owner: GITHUB_USER,
-        repo: REPO_NAME,
-        release_id: releaseId,
-        name: 'meta.json',
-        data: Buffer.from(JSON.stringify(meta), 'utf-8')
-    });
-
-    // Upload featured.webp if exists
-    if (image) {
-        await octokit.rest.repos.uploadReleaseAsset({
-            owner: GITHUB_USER,
-            repo: REPO_NAME,
-            release_id: releaseId,
-            name: 'featured.webp',
-            data: Buffer.from(image, 'base64')
-        });
-    }
-
-    return {
-        releaseId: releaseResponse.data.id,
-        releaseUrl: releaseResponse.data.html_url,
-        tagName: releaseResponse.data.tag_name
-    };
+  const final = await fetch(release.url, { headers: auth });
+  return final.json();
 }
-
-async function getLatestRelease(slug) {
-    const releases = await octokit.rest.repos.listReleases({
-        owner: GITHUB_USER,
-        repo: REPO_NAME
-    });
-
-    const postReleases = releases.data.filter(release => release.tag_name.startsWith(`${slug}-v`));
-    if (postReleases.length === 0) return null;
-
-    const latestRelease = postReleases.sort((a, b) => new Date(b.published_at) - new Date(a.published_at))[0];
-    return {
-        releaseId: latestRelease.id,
-        releaseUrl: latestRelease.html_url,
-        tagName: latestRelease.tag_name,
-        version: parseInt(latestRelease.tag_name.split('-v')[1])
-    };
-}
-
-async function getReleaseContent(releaseUrl) {
-    const response = await fetch(releaseUrl);
-    const data = await response.json();
-    return data;
-}
-
-module.exports = {
-    createRelease,
-    getLatestRelease,
-    getReleaseContent
-};

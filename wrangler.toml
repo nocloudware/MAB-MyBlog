@@ -1,12 +1,17 @@
+name = "mab-myblog"
+main = "src/workers/api/index.js"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
 [[d1_databases]]
 binding = "DB"
 database_name = "mab-myblog-db"
-database_id = ""
+database_id = "91d8f9f0-e4e9-4c38-a45c-de61ba7cf10f"
 
 [triggers]
 crons = ["* * * * *"]
 
 [vars]
-BASE_URL = ""
+BASE_URL = "https://mab-myblog.nocloudware.workers.dev"
 BLOG_NAME = "My Blog"
 BLOG_LANG = "en"

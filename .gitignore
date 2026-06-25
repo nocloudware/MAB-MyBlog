@@ -1,0 +1,10 @@
+.wrangler/
+body.json
+body.txt
+cookies.txt
+header.txt
+proyecto_completo.txt
+secrets.txt
+all.txt
+*.bat
+*.ps1

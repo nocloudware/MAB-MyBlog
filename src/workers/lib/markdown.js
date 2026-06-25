@@ -1,46 +1,20 @@
-const { marked } = require('marked');
-
-function markdownToHtml(markdown) {
-    return marked(markdown);
+export function markdownToHTML(md) {
+  let html = md;
+  html = html.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => `<pre><code class="language-${lang}">${code.trim()}</code></pre>`);
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  html = html.replace(/^#### (.+)$/gm, '<h4>$1</h4>');
+  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+  html = html.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+  html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1">');
+  html = html.replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>');
+  html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
+  html = html.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
+  html = html.replace(/^---$/gm, '<hr>');
+  return html;
 }
-
-function generateOgTags(meta, baseUrl) {
-    return `
-        <meta property="og:title" content="${meta.title}" />
-        <meta property="og:description" content="${meta.excerpt}" />
-        <meta property="og:type" content="article" />
-        <meta property="og:url" content="${meta.url}" />
-        ${meta.image ? `<meta property="og:image" content="${meta.image}" />` : ''}
-        <meta property="og:site_name" content="${process.env.BLOG_NAME}" />
-        <meta property="og:locale" content="${process.env.BLOG_LANG}" />
-        <meta name="twitter:card" content="summary_large_image" />
-        <meta name="twitter:title" content="${meta.title}" />
-        <meta name="twitter:description" content="${meta.excerpt}" />
-        ${meta.image ? `<meta name="twitter:image" content="${meta.image}" />` : ''}
-    `;
-}
-
-function generateHtmlTemplate(title, content, ogTags) {
-    return `
-    <!DOCTYPE html>
-    <html lang="${process.env.BLOG_LANG}">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>${title}</title>
-        ${ogTags}
-    </head>
-    <body>
-        <article>
-            ${content}
-        </article>
-    </body>
-    </html>
-    `;
-}
-
-module.exports = {
-    markdownToHtml,
-    generateOgTags,
-    generateHtmlTemplate
-};

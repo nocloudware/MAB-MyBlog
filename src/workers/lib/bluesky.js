@@ -1,46 +1,43 @@
-const { BskyAgent } = require('@atproto/api');
-const { encrypt, decrypt } = require('./crypto');
+import { decrypt } from './crypto.js';
 
-const BLUESKY_IDENTIFIER = process.env.BLUESKY_IDENTIFIER;
-const BLUESKY_PASSWORD = process.env.BLUESKY_PASSWORD;
-
-async function getBlueskyAgent() {
-    const agent = new BskyAgent({ service: 'https://bsky.social' });
-    await agent.login({ identifier: BLUESKY_IDENTIFIER, password: BLUESKY_PASSWORD });
-    return agent;
+export async function createBlueskySession(identifier, appPassword) {
+  const res = await fetch('https://bsky.social/xrpc/com.atproto.server.createSession', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ identifier, password: appPassword })
+  });
+  if (!res.ok) throw new Error('Bluesky auth failed');
+  return res.json();
 }
 
-async function postToBluesky(post, imageUrl) {
-    const agent = await getBlueskyAgent();
-    const { title, excerpt, url } = post;
-
-    const text = `${title}\n\n${excerpt}\n\nRead more: ${url}`;
-
-    const postRecord = {
-        $type: 'app.bsky.feed.post',
-        text: text,
-        createdAt: new Date().toISOString(),
-        embed: imageUrl ? {
-            $type: 'app.bsky.embed.external',
-            external: {
-                uri: url,
-                title: title,
-                description: excerpt,
-                thumb: imageUrl
-            }
-        } : undefined
-    };
-
-    const response = await agent.post(postRecord);
-    return response;
+async function getBlueskyCredentials(env) {
+  const row = await env.DB.prepare("SELECT encrypted_payload FROM social_tokens WHERE platform='bluesky'").first();
+  if (!row) throw new Error('Bluesky not connected');
+  return JSON.parse(await decrypt(row.encrypted_payload, env));
 }
 
-async function deleteFromBluesky(postId) {
-    const agent = await getBlueskyAgent();
-    await agent.deletePost(postId);
-}
+export async function publishToBluesky(post, env) {
+  const creds = await getBlueskyCredentials(env);
+  const session = await createBlueskySession(creds.identifier, creds.appPassword);
 
-module.exports = {
-    postToBluesky,
-    deleteFromBluesky
-};
+  const record = {
+    $type: 'app.bsky.feed.post',
+    text: post.message.slice(0, 300),
+    createdAt: new Date().toISOString(),
+    langs: ['en'],
+    embed: {
+      $type: 'app.bsky.embed.external',
+      external: { uri: post.articleUrl, title: post.title, description: post.excerpt || '' }
+    }
+  };
+
+  const res = await fetch('https://bsky.social/xrpc/com.atproto.repo.createRecord', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session.accessJwt}` },
+    body: JSON.stringify({ repo: session.did, collection: 'app.bsky.feed.post', record })
+  });
+  if (!res.ok) throw new Error('Bluesky post failed');
+  const { uri } = await res.json();
+  const rkey = uri.split('/').pop();
+  return { platform: 'bluesky', id: rkey, url: `https://bsky.app/profile/${session.did}/post/${rkey}` };
+}
