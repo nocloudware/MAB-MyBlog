@@ -24,27 +24,10 @@ function json(data, status = 200) {
   });
 }
 
-async function verifyAuth(request, env) {
-  const authHeader = request.headers.get('Authorization');
-  if (!authHeader || !authHeader.startsWith('Bearer ')) return false;
-  const token = authHeader.substring(7);
-  try {
-    const [payloadB64, signatureB64] = token.split('.');
-    const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(env.JWT_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
-    const sigBytes = Uint8Array.from(atob(signatureB64), c => c.charCodeAt(0));
-    const valid = await crypto.subtle.verify('HMAC', key, sigBytes, new TextEncoder().encode(payloadB64));
-    if (!valid) return false;
-    const payload = JSON.parse(atob(payloadB64));
-    return payload.exp > Math.floor(Date.now() / 1000);
-  } catch { return false; }
-}
-
-async function generateJWT(env) {
-  const payload = JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 86400, iat: Math.floor(Date.now() / 1000) });
-  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(env.JWT_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload));
-  const sigBase64 = btoa(Array.from(new Uint8Array(sig)).map(b => String.fromCharCode(b)).join(''));
-  return `${btoa(payload)}.${sigBase64}`;
+async function getEffectiveToken(env, key) {
+  const override = await env.DB.prepare('SELECT value FROM settings WHERE key=?').bind(`_${key}_token_override`).first();
+  if (override && override.value) return override.value;
+  return env[key];
 }
 
 async function extractPostParams(request) {
@@ -58,14 +41,126 @@ async function extractPostParams(request) {
   return { title: body.title, content: body.content, author: body.author || 'Author', hashtags: body.hashtags || '', tags: body.tags || [], imageFile: null };
 }
 
-// ============ RENDERER ============
-async function renderHome(env) {
-  const { results: posts } = await env.DB.prepare(`SELECT p.slug, p.title, p.author, p.created_at, v.excerpt, v.image_url, v.reading_time FROM posts p JOIN post_versions v ON p.slug=v.slug AND p.current_version=v.version WHERE p.status='published' ORDER BY p.created_at DESC LIMIT 20`).all();
-  const cards = posts.map(p => `<article style="background:#1a1a2e;border-radius:12px;padding:1.5rem;margin-bottom:1.5rem">${p.image_url?`<img src="${p.image_url}" style="width:100%;max-height:200px;object-fit:cover;border-radius:8px;margin-bottom:1rem">`:''}<h2><a href="/post/${p.slug}" style="color:#e0e0e0;text-decoration:none">${escapeHtml(p.title)}</a></h2><div style="color:#888;font-size:.85rem;margin:.5rem 0">${escapeHtml(p.excerpt||'')}</div><span style="color:#666;font-size:.8rem">${formatDate(p.created_at)} · ${p.reading_time} min</span></article>`).join('');
-  return new Response(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>${escapeHtml(env.BLOG_NAME||'My Blog')}</title><meta property="og:title" content="${escapeHtml(env.BLOG_NAME||'My Blog')}"><meta property="og:type" content="website"><meta property="og:url" content="${env.BASE_URL}"><link rel="canonical" href="${env.BASE_URL}"><style>body{font-family:-apple-system,sans-serif;background:#0a0a0f;color:#e0e0e0;max-width:800px;margin:0 auto;padding:2rem}h1{text-align:center;margin-bottom:2rem}a{color:#e94560;text-decoration:none}</style></head><body><h1>${escapeHtml(env.BLOG_NAME||'My Blog')}</h1>${cards}</body></html>`, { headers: { 'Content-Type': 'text/html' } });
+// ============ SHARED UI ============
+function buildSidebar() {
+  return {
+    css: `
+:root{--bg:#0a0a0f;--surface:#1a1a2e;--border:#2a2a3e;--text:#e0e0e0;--text2:#888;--accent:#e94560;--green:#4caf50;--radius:8px}
+.sidebar{width:340px;background:#111118;border-left:1px solid var(--border);padding:1rem;overflow-y:auto;display:none;position:fixed;right:0;top:0;bottom:0;z-index:100;font-size:.8rem}
+.sidebar.open{display:block}
+.sidebar h2{font-size:1rem;margin:0;color:var(--text)}
+.sidebar-divider{height:1px;background:var(--border);margin:1rem 0}
+.sidebar-section{margin-bottom:1rem}
+.section-title{font-size:.7rem;text-transform:uppercase;letter-spacing:.08em;color:var(--accent);margin-bottom:.5rem;font-weight:600}
+.status-badge{display:inline-block;padding:.15rem .5rem;border-radius:10px;font-size:.7rem;font-weight:600}
+.status-ok{background:rgba(76,175,80,.15);color:var(--green)}
+.status-error{background:rgba(244,67,54,.15);color:#f44336}
+.help-link{font-size:.7rem;color:#64b5f6;cursor:pointer;text-decoration:underline}
+.sidebar-toggle{position:fixed;right:0;top:50%;transform:translateY(-50%);background:var(--accent);color:#fff;border:none;padding:.6rem .35rem;border-radius:6px 0 0 6px;cursor:pointer;z-index:101;font-size:1rem;writing-mode:vertical-lr}
+.sidebar .form-group{margin-bottom:.5rem}
+.sidebar .form-group label{font-size:.7rem;color:#aaa;display:block;margin-bottom:.15rem}
+.sidebar input{width:100%;padding:.45rem .5rem;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:var(--radius);font-family:inherit;font-size:.75rem;box-sizing:border-box}
+.sidebar input:focus{outline:none;border-color:var(--accent)}
+.sidebar .btn-sm{padding:.3rem .7rem;font-size:.7rem;border:none;border-radius:var(--radius);cursor:pointer;font-family:inherit;background:var(--surface);color:var(--text);border:1px solid var(--border)}
+.sidebar .btn-green{background:var(--green);border:1px solid var(--green);color:#fff}
+.sidebar .btn-green:hover{background:#66bb6a}
+.sidebar .toggle-group{display:flex;align-items:center;justify-content:space-between;padding:.3rem 0;font-size:.8rem}
+.sidebar .toggle{position:relative;width:40px;height:20px}
+.sidebar .toggle input{opacity:0;width:0;height:0;position:absolute}
+.sidebar .toggle .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:var(--border);border-radius:20px;transition:.3s}
+.sidebar .toggle .slider:before{position:absolute;content:"";height:14px;width:14px;left:3px;bottom:3px;background:var(--text2);border-radius:50%;transition:.3s}
+.sidebar .toggle input:checked+.slider{background:var(--green)}
+.sidebar .toggle input:checked+.slider:before{transform:translateX(20px);background:#fff}
+.save-indicator{color:var(--green);font-size:.7rem;display:none;margin-left:.5rem}
+.post-actions{display:flex;flex-direction:column;gap:.4rem;flex-shrink:0}
+.post-actions button{background:var(--surface);border:1px solid var(--border);color:var(--text2);padding:.3rem .6rem;border-radius:6px;cursor:pointer;font-size:.7rem;white-space:nowrap}
+.post-actions button:hover{border-color:var(--accent);color:var(--accent)}
+.share-counts{display:flex;gap:1rem;font-size:.75rem;color:var(--text2);margin-top:.3rem}
+`,
+    html: `
+<div class="sidebar" id="sidebar">
+  <div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:.75rem;border-bottom:1px solid #2a2a3e;margin-bottom:1rem">
+    <h2>⚙ Settings</h2>
+    <button onclick="toggleSidebar()" style="background:none;border:none;color:#888;cursor:pointer;font-size:1.2rem;padding:0">&times;</button>
+  </div>
+  <div class="sidebar-section">
+    <div class="section-title">📢 Auto-Publish</div>
+    <div class="toggle-group"><span>🦋 Bluesky</span><label class="toggle"><input type="checkbox" id="autoBluesky" onchange="saveAutoPublish()"><span class="slider"></span></label></div>
+    <div class="toggle-group"><span>𝕏 Twitter/X</span><label class="toggle"><input type="checkbox" id="autoTwitter" onchange="saveAutoPublish()"><span class="slider"></span></label></div>
+  </div>
+  <div class="sidebar-divider"></div>
+  <div class="sidebar-section">
+    <div class="section-title">🦋 Bluesky</div>
+    <div class="form-group"><label>Identifier (user.bsky.social)</label><input type="text" id="bskyId" placeholder="user.bsky.social"></div>
+    <div class="form-group"><label>App Password</label><input type="password" id="bskyPass" placeholder="xxxx-xxxx-xxxx-xxxx"></div>
+    <span class="help-link" onclick="window.open('https://bsky.app/settings/app-passwords','_blank')">Get App Password →</span>
+    <div style="margin-top:.5rem"><button class="btn-sm btn-green" onclick="connectBluesky()">Connect</button> <span id="bskyStatus"></span></div>
+  </div>
+  <div class="sidebar-divider"></div>
+  <div class="sidebar-section">
+    <div class="section-title">𝕏 Twitter/X</div>
+    <div class="form-group"><label>API Key</label><input type="password" id="twKey"></div>
+    <div class="form-group"><label>API Secret</label><input type="password" id="twSecret"></div>
+    <div class="form-group"><label>Access Token</label><input type="password" id="twToken"></div>
+    <div class="form-group"><label>Access Secret</label><input type="password" id="twTokenSecret"></div>
+    <span class="help-link" onclick="window.open('https://developer.twitter.com/en/portal/dashboard','_blank')">Get API keys →</span>
+    <div style="margin-top:.5rem"><button class="btn-sm btn-green" onclick="connectTwitter()">Connect</button> <span id="twStatus"></span></div>
+  </div>
+  <div class="sidebar-divider"></div>
+  <div class="sidebar-section">
+    <div class="section-title">📝 Blog</div>
+    <div class="form-group"><label>Blog Name</label><input type="text" id="blogName"></div>
+    <div class="form-group"><label>Default Author</label><input type="text" id="defaultAuthor"></div>
+    <button class="btn-sm btn-green" onclick="saveSettings()">Save</button> <span class="save-indicator" id="settingsSaved">✓</span>
+  </div>
+</div>
+<button class="sidebar-toggle" id="sidebarToggle" onclick="toggleSidebar()" title="Settings">⚙</button>
+`,
+    js: `
+let _token=localStorage.getItem('token');
+function toggleSidebar(){document.getElementById('sidebar').classList.toggle('open')}
+document.addEventListener('click',function(e){const sb=document.getElementById('sidebar');const st=document.getElementById('sidebarToggle');if(sb.classList.contains('open')&&!sb.contains(e.target)&&e.target!==st&&!st.contains(e.target)){sb.classList.remove('open')}})
+async function connectBluesky(){const id=document.getElementById('bskyId').value;const pass=document.getElementById('bskyPass').value;if(!id||!pass){alert('Fill both fields');return}const r=await fetch('/api/social/connect',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+_token},body:JSON.stringify({platform:'bluesky',credentials:{identifier:id,appPassword:pass,handle:id}})});if(r.ok){document.getElementById('bskyStatus').innerHTML='<span class="status-badge status-ok">✓ OK</span>'}else{document.getElementById('bskyStatus').innerHTML='<span class="status-badge status-error">✗ Fail</span>'}}
+async function connectTwitter(){const key=document.getElementById('twKey').value;const secret=document.getElementById('twSecret').value;const at=document.getElementById('twToken').value;const ats=document.getElementById('twTokenSecret').value;if(!key||!secret||!at||!ats){alert('Fill all fields');return}const r=await fetch('/api/social/connect',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+_token},body:JSON.stringify({platform:'twitter',credentials:{apiKey:key,apiSecret:secret,accessToken:at,accessSecret:ats}})});if(r.ok){document.getElementById('twStatus').innerHTML='<span class="status-badge status-ok">✓ OK</span>'}else{document.getElementById('twStatus').innerHTML='<span class="status-badge status-error">✗ Fail</span>'}}
+async function saveSettings(){const blogName=document.getElementById('blogName').value;const author=document.getElementById('defaultAuthor').value;const r=await fetch('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json','Authorization':'Bearer '+_token},body:JSON.stringify({blog_name:blogName,author_name:author})});if(r.ok){localStorage.setItem('autoBluesky',document.getElementById('autoBluesky').checked);localStorage.setItem('autoTwitter',document.getElementById('autoTwitter').checked);document.getElementById('settingsSaved').style.display='inline';setTimeout(()=>document.getElementById('settingsSaved').style.display='none',2000)}}
+function saveAutoPublish(){localStorage.setItem('autoBluesky',document.getElementById('autoBluesky').checked);localStorage.setItem('autoTwitter',document.getElementById('autoTwitter').checked)}
+async function loadSettings(){try{const r=await fetch('/api/settings',{headers:{'Authorization':'Bearer '+_token}});if(r.ok){const d=await r.json();const s=d.settings||{};document.getElementById('blogName').value=s.blog_name||'';document.getElementById('defaultAuthor').value=s.author_name||'';document.getElementById('autoBluesky').checked=localStorage.getItem('autoBluesky')==='true';document.getElementById('autoTwitter').checked=localStorage.getItem('autoTwitter')==='true'}}catch(e){}}
+async function publishToSocial(slug,platform){if(!_token){alert('Login required');return}const r=await fetch('/api/publish',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+_token},body:JSON.stringify({postSlug:slug,platforms:[platform]})});if(r.ok){const d=await r.json();if(d.results[0]&&d.results[0].success){alert('Published to '+platform+'!');location.reload()}else{alert('Failed: '+(d.results[0]?.error||'Unknown error'))}}else{alert('Error publishing')}}
+if(_token){loadSettings();document.querySelectorAll('.post-actions').forEach(el=>el.style.display='flex');document.getElementById('sidebarToggle').style.display='block'}
+`
+  };
 }
 
-async function renderPost(slug, requestedVersion, env) {
+// ============ RENDERER ============
+async function renderHome(env) {
+  const sb = buildSidebar();
+  const { results: posts } = await env.DB.prepare(`SELECT p.slug, p.title, p.author, p.created_at, v.excerpt, v.image_url, v.reading_time FROM posts p JOIN post_versions v ON p.slug=v.slug AND p.current_version=v.version WHERE p.status='published' ORDER BY p.created_at DESC LIMIT 20`).all();
+
+  const slugs = posts.map(p => `'${p.slug}'`).join(',');
+  let shareCounts = {};
+  if (slugs) {
+    const { results: counts } = await env.DB.prepare(`SELECT post_slug, platform, COUNT(*) as cnt FROM social_shares WHERE post_slug IN (${slugs}) AND status='published' GROUP BY post_slug, platform`).all();
+    for (const c of counts) {
+      if (!shareCounts[c.post_slug]) shareCounts[c.post_slug] = {};
+      shareCounts[c.post_slug][c.platform] = c.cnt;
+    }
+  }
+
+  const cards = posts.map(p => {
+    const sc = shareCounts[p.slug] || {};
+    const bskyCount = sc.bluesky || 0;
+    const twCount = sc.twitter || 0;
+    return `<article class="post-card">${p.image_url?`<img src="${p.image_url}" alt="">`:''}<div style="flex:1"><h2><a href="/post/${p.slug}">${escapeHtml(p.title)}</a></h2><div class="post-author">by ${escapeHtml(p.author||'Author')}</div><div class="post-excerpt">${escapeHtml(p.excerpt||'')}</div><div class="share-counts"><span>🦋 ${bskyCount}</span><span>𝕏 ${twCount}</span><span>📅 ${formatDate(p.created_at)}</span><span>⏱️ ${p.reading_time} min</span></div></div><div class="post-actions" style="display:none"><button onclick="publishToSocial('${p.slug}','bluesky')">🦋 Bluesky</button><button onclick="publishToSocial('${p.slug}','twitter')">𝕏 Twitter</button></div></article>`;
+  }).join('');
+
+  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>${escapeHtml(env.BLOG_NAME||'My Blog')}</title><meta property="og:title" content="${escapeHtml(env.BLOG_NAME||'My Blog')}"><meta property="og:type" content="website"><link rel="canonical" href="${env.BASE_URL}"><style>:root{--bg:#0a0a0f;--surface:#1a1a2e;--text:#e0e0e0;--text2:#888;--accent:#e94560}body{font-family:-apple-system,sans-serif;background:var(--bg);color:var(--text);margin:0;min-height:100vh}.container{max-width:800px;margin:0 auto;padding:2rem}h1{font-size:2.2rem;margin-bottom:.25rem;color:var(--accent)}.blog-subtitle{color:var(--text2);margin-bottom:2rem;font-size:.9rem}a{color:var(--accent);text-decoration:none}.new-post-link{display:inline-block;margin-bottom:2rem;padding:.5rem 1rem;background:var(--accent);color:#fff;border-radius:6px;font-size:.85rem}.post-card{background:var(--surface);border-radius:12px;padding:1.5rem;margin-bottom:1.5rem;display:flex;gap:1.5rem;align-items:center}.post-card img{width:120px;height:80px;object-fit:cover;border-radius:8px;flex-shrink:0}.post-card h2{margin:0 0 .15rem}.post-author{color:var(--text2);font-size:.8rem;margin-bottom:.25rem}.post-excerpt{color:var(--text2);font-size:.85rem;margin:.25rem 0}.share-counts{display:flex;gap:1rem;font-size:.75rem;color:var(--text2);margin-top:.3rem}.post-actions{display:flex;flex-direction:column;gap:.4rem;flex-shrink:0}.post-actions button{background:var(--surface);border:1px solid var(--border);color:var(--text2);padding:.3rem .6rem;border-radius:6px;cursor:pointer;font-size:.7rem;white-space:nowrap}.post-actions button:hover{border-color:var(--accent);color:var(--accent)}${sb.css}</style></head><body>${sb.html}<div class="container"><h1>${escapeHtml(env.BLOG_NAME||'My Blog')}</h1><p class="blog-subtitle">by ${escapeHtml((await env.DB.prepare("SELECT value FROM settings WHERE key='author_name'").first())?.value||'Author')}</p><a href="/editor" class="new-post-link" id="newPostLink" style="display:none">✍ New Post</a>${cards}</div><script>${sb.js}
+if(_token){document.getElementById('newPostLink').style.display='inline-block'}
+</script></body></html>`;
+  return new Response(html, { headers: { 'Content-Type': 'text/html' } });
+}
+
+async function renderPostPage(slug, requestedVersion, env) {
+  const sb = buildSidebar();
   let v;
   if (requestedVersion) {
     v = await env.DB.prepare('SELECT pv.*, p.title as post_title FROM post_versions pv JOIN posts p ON p.slug=pv.slug WHERE pv.slug=? AND pv.version=?').bind(slug, requestedVersion).first();
@@ -75,7 +170,6 @@ async function renderPost(slug, requestedVersion, env) {
     v = await env.DB.prepare('SELECT pv.*, p.title as post_title FROM post_versions pv JOIN posts p ON p.slug=pv.slug WHERE pv.slug=? AND pv.version=?').bind(slug, post.current_version).first();
   }
   if (!v) return new Response('Not found', { status: 404 });
-
   try {
     const res = await fetch(v.article_url);
     const md = await res.text();
@@ -83,16 +177,29 @@ async function renderPost(slug, requestedVersion, env) {
     const contentHTML = markdownToHTML(body);
     const isLatest = !requestedVersion;
     const title = v.post_title || slug;
-    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>${escapeHtml(title)} | ${escapeHtml(env.BLOG_NAME||'Blog')}</title><meta name="description" content="${escapeHtml(v.excerpt||'')}"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${escapeHtml(v.excerpt||'')}"><meta property="og:image" content="${v.image_url||''}"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:url" content="${env.BASE_URL}/post/${slug}"><meta property="og:type" content="article"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="${escapeHtml(title)}"><meta name="twitter:description" content="${escapeHtml(v.excerpt||'')}"><meta name="twitter:image" content="${v.image_url||''}"><link rel="canonical" href="${env.BASE_URL}/post/${slug}"><style>body{font-family:-apple-system,sans-serif;background:#0a0a0f;color:#e0e0e0;line-height:1.8;font-size:18px;max-width:800px;margin:0 auto;padding:2rem}h1{font-size:2.2rem;margin-bottom:.5rem}.meta{color:#888;font-size:.9rem;margin-bottom:1.5rem}img{max-width:100%;border-radius:12px;margin:1.5rem 0}blockquote{border-left:3px solid #e94560;padding:.5rem 1rem;color:#888;font-style:italic}a{color:#e94560}code{background:#1a1a2e;padding:.2rem .5rem;border-radius:4px}pre{background:#1a1a2e;padding:1.5rem;border-radius:8px;overflow-x:auto}pre code{background:none;padding:0}${!isLatest?'.old{background:rgba(255,152,0,.1);padding:1rem;border-radius:8px;margin-bottom:1.5rem}':''}</style></head><body>${!isLatest?`<div class="old">Viewing v${v.version}. <a href="/post/${slug}">See latest</a></div>`:''}<h1>${escapeHtml(title)}</h1><div class="meta">${v.reading_time} min read · v${v.version}</div>${v.image_url?`<img src="${v.image_url}" alt="${escapeHtml(title)}">`:''}<div>${contentHTML}</div><p style="margin-top:3rem"><a href="/">← Back to blog</a></p></body></html>`;
+    const ogImage = v.image_url || '';
+    const ogDesc = escapeHtml(v.excerpt||'');
+    const content = `${!isLatest?`<div class="old">Viewing v${v.version}. <a href="/post/${slug}">See latest</a></div>`:''}${v.image_url?`<img src="${v.image_url}" alt="${escapeHtml(title)}" class="featured-image">`:''}<h1>${escapeHtml(title)}</h1><div class="meta">${v.reading_time} min read · v${v.version}</div><div>${contentHTML}</div><p style="margin-top:3rem"><a href="/">← Back to blog</a></p>`;
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>${escapeHtml(title)} | ${escapeHtml(env.BLOG_NAME||'Blog')}</title><meta name="description" content="${ogDesc}"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${ogDesc}"><meta property="og:image" content="${ogImage}"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:url" content="${env.BASE_URL}/post/${slug}"><meta property="og:type" content="article"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="${escapeHtml(title)}"><meta name="twitter:description" content="${ogDesc}"><meta name="twitter:image" content="${ogImage}"><link rel="canonical" href="${env.BASE_URL}/post/${slug}"><style>:root{--bg:#0a0a0f;--surface:#1a1a2e;--text:#e0e0e0;--text2:#888;--accent:#e94560}body{font-family:-apple-system,sans-serif;background:var(--bg);color:var(--text);margin:0;min-height:100vh}.container{max-width:800px;margin:0 auto;padding:2rem}h1{font-size:2.2rem;margin-bottom:.5rem;color:var(--accent)}a{color:var(--accent);text-decoration:none}img{max-width:100%;border-radius:12px;margin:1.5rem 0}blockquote{border-left:3px solid var(--accent);padding:.5rem 1rem;color:var(--text2);font-style:italic}code{background:var(--surface);padding:.2rem .5rem;border-radius:4px}pre{background:var(--surface);padding:1.5rem;border-radius:8px;overflow-x:auto}pre code{background:none;padding:0}.featured-image{width:100%;max-height:400px;object-fit:cover;border-radius:12px;margin-bottom:1.5rem}.meta{color:var(--text2);font-size:.9rem;margin-bottom:1.5rem}.old{background:rgba(255,152,0,.1);padding:1rem;border-radius:8px;margin-bottom:1.5rem}${sb.css}</style></head><body>${sb.html}<div class="container">${content}</div><script>${sb.js}</script></body></html>`;
     return new Response(html, { headers: { 'Content-Type': 'text/html', 'Cache-Control': isLatest ? 'public, max-age=3600' : 'public, max-age=31536000, immutable' } });
   } catch {
     return new Response('Temporarily unavailable', { status: 503 });
   }
 }
 
-// ============ EDITOR PAGE ============
-function renderEditor() {
-  return new Response(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>MAB-MyBlog Editor</title><style>body{font-family:-apple-system,sans-serif;background:#0a0a0f;color:#e0e0e0;max-width:700px;margin:0 auto;padding:2rem}input,textarea{width:100%;padding:.75rem;margin:.5rem 0 1rem;background:#1a1a2e;border:1px solid #2a2a3e;color:#e0e0e0;border-radius:8px;font-family:inherit}textarea{resize:vertical;min-height:300px;font-family:monospace;font-size:.9rem}button{background:#e94560;color:#fff;border:none;padding:.75rem 2rem;border-radius:8px;cursor:pointer;font-size:1rem}button:hover{background:#ff6b6b}h1{text-align:center}.login-form{max-width:400px;margin:4rem auto}.form-group{margin-bottom:1rem}.form-group label{display:block;margin-bottom:.25rem;font-weight:500}</style></head><body><div class="editor-container"><header><h1>MAB-MyBlog</h1><p style="text-align:center;color:#888">Write. Save. Publish.</p></header><div id="login-form" class="login-form"><h2>Login</h2><form onsubmit="handleLogin(event)"><div class="form-group"><label>Password</label><input type="password" id="login-password" required></div><button type="submit">Login</button></form></div><div id="editor-form" style="display:none"><form onsubmit="createPost(event)"><div class="form-group"><label>Title</label><input type="text" id="title" required></div><div class="form-group"><label>Content (Markdown)</label><textarea id="content" rows="20" required></textarea></div><div class="form-group"><label>Featured Image</label><input type="file" id="image" accept="image/*"></div><div class="form-group"><label>Hashtags</label><input type="text" id="hashtags" maxlength="100" placeholder="#blog #writing"></div><button type="submit">Publish</button></form></div></div><script>let token=localStorage.getItem('token');if(token){document.getElementById('login-form').style.display='none';document.getElementById('editor-form').style.display='block'}async function handleLogin(e){e.preventDefault();const p=document.getElementById('login-password').value;const r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:p})});if(r.ok){const d=await r.json();token=d.token;localStorage.setItem('token',token);document.getElementById('login-form').style.display='none';document.getElementById('editor-form').style.display='block'}else{alert('Wrong password')}}async function createPost(e){e.preventDefault();const title=document.getElementById('title').value;const content=document.getElementById('content').value;const hashtags=document.getElementById('hashtags').value;const r=await fetch('/api/posts',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify({title,content,hashtags})});if(r.ok){const d=await r.json();alert('Published! '+d.public_url);window.open(d.public_url,'_blank');document.getElementById('title').value='';document.getElementById('content').value='';document.getElementById('hashtags').value=''}else{alert('Error: '+(await r.json()).error)}}</script></body></html>`, { headers: { 'Content-Type': 'text/html' } });
+async function renderEditorPage(env) {
+  const sb = buildSidebar();
+  const content = `<h1>MAB-MyBlog</h1><p style="text-align:center;color:var(--text2)">Write. Save. Publish.</p>
+<div id="login-form" class="login-form"><h2>Login</h2><form onsubmit="handleLogin(event)"><div class="form-group"><label>Password</label><input type="password" id="login-password" required></div><button type="submit">Login</button></form></div>
+<div id="editor-form" style="display:none"><form onsubmit="createPost(event)"><div class="form-group"><label>Title</label><input type="text" id="title" required></div><div class="form-group"><label>Content (Markdown)</label><textarea id="content" rows="20" required></textarea></div><div class="form-group"><label>Featured Image</label><input type="file" id="image" accept="image/*"></div><div class="form-group"><label>Hashtags</label><input type="text" id="hashtags" maxlength="100" placeholder="#blog #writing"></div><button type="submit">Publish</button></form></div>`;
+  const editorJS = `
+let token=_token;
+if(token){document.getElementById('login-form').style.display='none';document.getElementById('editor-form').style.display='block'}
+async function handleLogin(e){e.preventDefault();const p=document.getElementById('login-password').value;const r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:p})});if(r.ok){const d=await r.json();token=d.token;localStorage.setItem('token',token);_token=token;document.getElementById('login-form').style.display='none';document.getElementById('editor-form').style.display='block';loadSettings()}else{alert('Wrong password')}}
+async function createPost(e){e.preventDefault();const title=document.getElementById('title').value;const content=document.getElementById('content').value;const hashtags=document.getElementById('hashtags').value;const imageFile=document.getElementById('image').files[0];const fd=new FormData();fd.append('title',title);fd.append('content',content);fd.append('hashtags',hashtags);if(imageFile)fd.append('image',imageFile);const r=await fetch('/api/posts',{method:'POST',headers:{'Authorization':'Bearer '+token},body:fd});if(r.ok){const d=await r.json();if(document.getElementById('autoBluesky').checked||document.getElementById('autoTwitter').checked){const platforms=[];if(document.getElementById('autoBluesky').checked)platforms.push('bluesky');if(document.getElementById('autoTwitter').checked)platforms.push('twitter');await fetch('/api/publish',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify({postSlug:d.slug,platforms,message:title})})}alert('Published! '+d.public_url);window.open(d.public_url,'_blank');document.getElementById('title').value='';document.getElementById('content').value='';document.getElementById('hashtags').value='';document.getElementById('image').value=''}else{alert('Error: '+(await r.json()).error)}}
+`;
+  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Editor | MAB-MyBlog</title><style>:root{--bg:#0a0a0f;--surface:#1a1a2e;--border:#2a2a3e;--text:#e0e0e0;--text2:#888;--accent:#e94560;--radius:8px}body{font-family:-apple-system,sans-serif;background:var(--bg);color:var(--text);margin:0;min-height:100vh}.container{max-width:700px;margin:0 auto;padding:2rem}input,textarea{width:100%;padding:.75rem;margin:.5rem 0 1rem;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:var(--radius);font-family:inherit;box-sizing:border-box}textarea{resize:vertical;min-height:300px;font-family:monospace;font-size:.9rem}button{background:var(--accent);color:#fff;border:none;padding:.75rem 2rem;border-radius:var(--radius);cursor:pointer;font-size:1rem}button:hover{background:#ff6b6b}.form-group{margin-bottom:1rem}.form-group label{display:block;margin-bottom:.25rem;font-weight:500;font-size:.9rem;color:var(--text)}.form-group input[type="file"]{padding:.5rem;color:var(--text2)}.login-form{max-width:400px;margin:4rem auto}h1{color:var(--accent)}${sb.css}</style></head><body>${sb.html}<div class="container">${content}</div><script>${sb.js}${editorJS}</script></body></html>`;
+  return new Response(html, { headers: { 'Content-Type': 'text/html' } });
 }
 
 // ============ SCHEDULER ============
@@ -130,51 +237,35 @@ export default {
 
     if (method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
 
-    // Well-known
     if (path === '/.well-known/site.standard.publication') {
       const row = await env.DB.prepare("SELECT value FROM settings WHERE key='atproto_publication_uri'").first();
       return new Response(row?.value || '', { headers: { 'Content-Type': 'text/plain' } });
     }
 
-    // Editor route
-    if (method === 'GET' && (path === '/editor' || path === '/editor/')) return renderEditor();
-
-    // Renderer routes
+    if (method === 'GET' && (path === '/editor' || path === '/editor/')) return renderEditorPage(env);
     if (method === 'GET' && path === '/') return renderHome(env);
     const slugMatch = path.match(/^\/post\/([a-z0-9-]+)(?:\/v(\d+))?$/);
-    if (method === 'GET' && slugMatch) return renderPost(slugMatch[1], slugMatch[2] ? parseInt(slugMatch[2]) : null, env);
+    if (method === 'GET' && slugMatch) return renderPostPage(slugMatch[1], slugMatch[2] ? parseInt(slugMatch[2]) : null, env);
 
-    // API: list posts
     if (method === 'GET' && path === '/api/posts') {
       const { results } = await env.DB.prepare(`SELECT p.slug,p.title,p.author,p.status,p.created_at,v.excerpt,v.image_url,v.word_count,v.reading_time FROM posts p JOIN post_versions v ON p.slug=v.slug AND p.current_version=v.version WHERE p.status='published' ORDER BY p.created_at DESC`).all();
       return json({ posts: results });
     }
 
-    // API: single post
     if (method === 'GET' && path.match(/^\/api\/posts\/[a-z0-9-]+$/)) {
       const slug = path.split('/').pop();
       const post = await env.DB.prepare(`SELECT p.*,v.article_url,v.image_url,v.meta_url,v.excerpt,v.word_count,v.reading_time FROM posts p JOIN post_versions v ON p.slug=v.slug AND p.current_version=v.version WHERE p.slug=? AND p.status='published'`).bind(slug).first();
       if (!post) return json({ error: 'Not found' }, 404);
-      try {
-        const res = await fetch(post.article_url);
-        const { body } = parseFrontmatter(await res.text());
-        return json({ slug: post.slug, title: post.title, author: post.author, content: body, excerpt: post.excerpt, image_url: post.image_url, word_count: post.word_count, reading_time: post.reading_time, created_at: post.created_at, version: post.current_version });
-      } catch { return json({ slug: post.slug, title: post.title, excerpt: post.excerpt }); }
+      try { const res = await fetch(post.article_url); const { body } = parseFrontmatter(await res.text()); return json({ slug: post.slug, title: post.title, author: post.author, content: body, excerpt: post.excerpt, image_url: post.image_url, word_count: post.word_count, reading_time: post.reading_time, created_at: post.created_at, version: post.current_version }); }
+      catch { return json({ slug: post.slug, title: post.title, excerpt: post.excerpt }); }
     }
 
-    // Auth
     if (method === 'POST' && path === '/api/auth/login') {
       const { password } = await request.json();
       if (password !== env.ADMIN_PASSWORD) return json({ error: 'Unauthorized' }, 401);
       return json({ success: true, token: await generateJWT(env) });
     }
 
-    // Protect mutations (TEMP disabled for testing)
-    // if (['POST','PUT','DELETE'].includes(method) && !path.includes('/auth/')) {
-    //   if (!(await verifyAuth(request, env))) return json({ error: 'Unauthorized' }, 401);
-    // }
-
-    // Create post
     if (method === 'POST' && path === '/api/posts') {
       try {
         const { title, content, author, hashtags, tags, imageFile } = await extractPostParams(request);
@@ -187,7 +278,8 @@ export default {
         const metaJson = JSON.stringify({ title, author, slug, tags, excerpt, date: date.toISOString(), word_count: wordCount, reading_time: readingTime });
         const assets = [{ name: 'article.md', content: articleMd, content_type: 'text/markdown' }, { name: 'meta.json', content: metaJson, content_type: 'application/json' }];
         if (imageFile) assets.push({ name: 'featured.webp', content: imageFile, content_type: 'image/webp' });
-        const release = await createGitHubRelease(releaseTag, title, assets, env);
+        const ghToken = await getEffectiveToken(env, 'GITHUB');
+        const release = await createGitHubRelease(releaseTag, title, assets, { ...env, GITHUB_TOKEN: ghToken });
         const articleUrl = release.assets.find(a => a.name === 'article.md').browser_download_url;
         const imageUrl = release.assets.find(a => a.name === 'featured.webp')?.browser_download_url || null;
         await env.DB.batch([
@@ -198,7 +290,6 @@ export default {
       } catch (e) { return json({ error: e.message }, 500); }
     }
 
-    // Update post
     if (method === 'PUT' && path.match(/^\/api\/posts\/[a-z0-9-]+$/)) {
       try {
         const slug = path.split('/').pop();
@@ -210,7 +301,8 @@ export default {
         const excerpt = getExcerpt(content), wordCount = countWords(content), readingTime = readingTimeMinutes(wordCount);
         const assets = [{ name: 'article.md', content, content_type: 'text/markdown' }, { name: 'meta.json', content: JSON.stringify({ title, slug, excerpt, updated_at: new Date().toISOString(), word_count: wordCount, reading_time: readingTime }), content_type: 'application/json' }];
         if (imageFile) assets.push({ name: 'featured.webp', content: imageFile, content_type: 'image/webp' });
-        const release = await createGitHubRelease(releaseTag, title, assets, env);
+        const ghToken = await getEffectiveToken(env, 'GITHUB');
+        const release = await createGitHubRelease(releaseTag, title, assets, { ...env, GITHUB_TOKEN: ghToken });
         const articleUrl = release.assets.find(a => a.name === 'article.md').browser_download_url;
         const imageUrl = release.assets.find(a => a.name === 'featured.webp')?.browser_download_url || post.image_url_cache;
         await env.DB.batch([
@@ -221,7 +313,6 @@ export default {
       } catch (e) { return json({ error: e.message }, 500); }
     }
 
-    // Delete post
     if (method === 'DELETE' && path.match(/^\/api\/posts\/[a-z0-9-]+$/)) {
       const slug = path.split('/').pop();
       const post = await env.DB.prepare('SELECT * FROM posts WHERE slug=?').bind(slug).first();
@@ -232,7 +323,6 @@ export default {
       return json({ success: true, deleted: slug });
     }
 
-    // Publish to social
     if (method === 'POST' && path === '/api/publish') {
       try {
         const { postSlug, platforms, message } = await request.json();
@@ -251,7 +341,6 @@ export default {
       } catch (e) { return json({ error: e.message }, 500); }
     }
 
-    // Delete from social
     if (method === 'DELETE' && path === '/api/publish') {
       try {
         const { postSlug, platforms } = await request.json();
@@ -263,7 +352,6 @@ export default {
       } catch (e) { return json({ error: e.message }, 500); }
     }
 
-    // Social connect
     if (method === 'POST' && path === '/api/social/connect') {
       try {
         const { platform, credentials } = await request.json();
@@ -280,7 +368,6 @@ export default {
       return json({ connections: results });
     }
 
-    // Schedule
     if (method === 'GET' && path === '/api/schedule') {
       const { results } = await env.DB.prepare('SELECT * FROM publication_schedules ORDER BY created_at DESC').all();
       return json({ schedules: results });
@@ -298,10 +385,19 @@ export default {
       return json({ success: true });
     }
 
-    // Hashtags & Settings
     if (method === 'GET' && path === '/api/hashtags') { const { results } = await env.DB.prepare('SELECT * FROM hashtag_templates ORDER BY day_of_week').all(); return json({ hashtags: results }); }
-    if (method === 'GET' && path === '/api/settings') { const { results } = await env.DB.prepare('SELECT * FROM settings').all(); const s = {}; for (const r of results) s[r.key] = r.value; return json({ settings: s }); }
-    if (method === 'PUT' && path === '/api/settings') { const d = await request.json(); for (const [k, v] of Object.entries(d)) await env.DB.prepare('INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)').bind(k, String(v)).run(); return json({ success: true }); }
+    if (method === 'GET' && path === '/api/settings') {
+      const { results } = await env.DB.prepare('SELECT * FROM settings').all();
+      const s = {}; for (const r of results) s[r.key] = r.value;
+      return json({ settings: s });
+    }
+    if (method === 'PUT' && path === '/api/settings') {
+      const d = await request.json();
+      if (d._github_token) { await env.DB.prepare("INSERT OR REPLACE INTO settings (key,value) VALUES ('_GITHUB_token_override',?)").bind(d._github_token).run(); delete d._github_token; }
+      if (d._cf_token) { await env.DB.prepare("INSERT OR REPLACE INTO settings (key,value) VALUES ('_cf_token_override',?)").bind(d._cf_token).run(); delete d._cf_token; }
+      for (const [k, v] of Object.entries(d)) await env.DB.prepare('INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)').bind(k, String(v)).run();
+      return json({ success: true });
+    }
 
     return new Response('Not Found', { status: 404, headers: corsHeaders });
   },
