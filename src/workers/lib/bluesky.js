@@ -20,6 +20,23 @@ export async function publishToBluesky(post, env) {
   const creds = await getBlueskyCredentials(env);
   const session = await createBlueskySession(creds.identifier, creds.appPassword);
 
+  let thumb = null;
+  if (post.ogImage) {
+    try {
+      const imgRes = await fetch(post.ogImage);
+      const imgBlob = await imgRes.arrayBuffer();
+      const uploadRes = await fetch('https://bsky.social/xrpc/com.atproto.repo.uploadBlob', {
+        method: 'POST',
+        headers: { 'Content-Type': 'image/webp', 'Authorization': `Bearer ${session.accessJwt}` },
+        body: imgBlob
+      });
+      if (uploadRes.ok) {
+        const { blob } = await uploadRes.json();
+        thumb = blob;
+      }
+    } catch (e) { console.error('Bluesky thumb upload failed:', e); }
+  }
+
   const record = {
     $type: 'app.bsky.feed.post',
     text: post.message.slice(0, 300),
@@ -27,7 +44,12 @@ export async function publishToBluesky(post, env) {
     langs: ['en'],
     embed: {
       $type: 'app.bsky.embed.external',
-      external: { uri: post.articleUrl, title: post.title, description: post.excerpt || '' }
+      external: {
+        uri: post.articleUrl,
+        title: post.title,
+        description: post.excerpt || '',
+        ...(thumb ? { thumb: { $type: 'blob', ref: thumb.ref, mimeType: thumb.mimeType, size: thumb.size } } : {})
+      }
     }
   };
 

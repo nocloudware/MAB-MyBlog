@@ -191,14 +191,51 @@ async function renderEditorPage(env) {
   const sb = buildSidebar();
   const content = `<h1>MAB-MyBlog</h1><p style="text-align:center;color:var(--text2)">Write. Save. Publish.</p>
 <div id="login-form" class="login-form"><h2>Login</h2><form onsubmit="handleLogin(event)"><div class="form-group"><label>Password</label><input type="password" id="login-password" required></div><button type="submit">Login</button></form></div>
-<div id="editor-form" style="display:none"><form onsubmit="createPost(event)"><div class="form-group"><label>Title</label><input type="text" id="title" required></div><div class="form-group"><label>Content (Markdown)</label><textarea id="content" rows="20" required></textarea></div><div class="form-group"><label>Featured Image</label><input type="file" id="image" accept="image/*"></div><div class="form-group"><label>Hashtags</label><input type="text" id="hashtags" maxlength="100" placeholder="#blog #writing"></div><button type="submit">Publish</button></form></div>`;
+<div id="editor-form" style="display:none"><form onsubmit="createPost(event)">
+  <div class="form-group"><label>Title</label><input type="text" id="title" required></div>
+  <div class="form-group"><label>Content (Markdown)</label><textarea id="content" rows="20" required oninput="updatePreview()"></textarea></div>
+  <div class="form-group"><label>Featured Image</label><input type="file" id="image" accept="image/*" onchange="updatePreview()"></div>
+  <div class="form-group"><label>Hashtags</label><input type="text" id="hashtags" maxlength="100" placeholder="#blog #writing" oninput="updatePreview()"></div>
+  <div class="form-group"><label>Custom Message (optional, max 280 chars)</label><textarea id="customMessage" rows="3" maxlength="280" placeholder="Override default message..." oninput="updatePreview()" style="min-height:60px;resize:vertical"></textarea></div>
+  <div style="display:flex;gap:2rem;margin-bottom:1rem">
+    <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer"><input type="checkbox" id="pubBluesky" checked> 🦋 Publish to Bluesky</label>
+    <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer"><input type="checkbox" id="pubTwitter" checked> 𝕏 Publish to Twitter</label>
+  </div>
+  <div id="socialPreview" style="background:var(--surface);border-radius:8px;padding:1rem;margin-bottom:1rem;display:none">
+    <div style="font-size:.7rem;text-transform:uppercase;color:var(--accent);margin-bottom:.5rem">📱 Social Preview</div>
+    <div style="display:flex;gap:1rem;align-items:flex-start">
+      <div id="previewImage" style="width:120px;height:80px;background:var(--border);border-radius:6px;flex-shrink:0;background-size:cover;background-position:center;display:none"></div>
+      <div style="flex:1;min-width:0">
+        <div id="previewUrl" style="font-size:.65rem;color:var(--text2);margin-bottom:.15rem">mab-myblog.nocloudware.workers.dev</div>
+        <div id="previewTitle" style="font-weight:600;font-size:.85rem;margin-bottom:.15rem">Title preview</div>
+        <div id="previewDesc" style="font-size:.75rem;color:var(--text2)">Description preview...</div>
+      </div>
+    </div>
+    <div id="previewMsg" style="font-size:.8rem;margin-top:.5rem;padding-top:.5rem;border-top:1px solid var(--border);color:var(--text)"></div>
+  </div>
+  <button type="submit">Publish</button>
+</form></div>`;
   const editorJS = `
 let token=_token;
 if(token){document.getElementById('login-form').style.display='none';document.getElementById('editor-form').style.display='block'}
 async function handleLogin(e){e.preventDefault();const p=document.getElementById('login-password').value;const r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:p})});if(r.ok){const d=await r.json();token=d.token;localStorage.setItem('token',token);_token=token;document.getElementById('login-form').style.display='none';document.getElementById('editor-form').style.display='block';loadSettings()}else{alert('Wrong password')}}
-async function createPost(e){e.preventDefault();const title=document.getElementById('title').value;const content=document.getElementById('content').value;const hashtags=document.getElementById('hashtags').value;const imageFile=document.getElementById('image').files[0];const fd=new FormData();fd.append('title',title);fd.append('content',content);fd.append('hashtags',hashtags);if(imageFile)fd.append('image',imageFile);const r=await fetch('/api/posts',{method:'POST',headers:{'Authorization':'Bearer '+token},body:fd});if(r.ok){const d=await r.json();if(document.getElementById('autoBluesky').checked||document.getElementById('autoTwitter').checked){const platforms=[];if(document.getElementById('autoBluesky').checked)platforms.push('bluesky');if(document.getElementById('autoTwitter').checked)platforms.push('twitter');await fetch('/api/publish',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify({postSlug:d.slug,platforms,message:title})})}alert('Published! '+d.public_url);window.open(d.public_url,'_blank');document.getElementById('title').value='';document.getElementById('content').value='';document.getElementById('hashtags').value='';document.getElementById('image').value=''}else{alert('Error: '+(await r.json()).error)}}
+function updatePreview(){
+  const title=document.getElementById('title').value||'Title preview';
+  const content=document.getElementById('content').value||'';
+  const hashtags=document.getElementById('hashtags').value||'';
+  const customMsg=document.getElementById('customMessage').value||'';
+  const imgFile=document.getElementById('image').files[0];
+  document.getElementById('previewTitle').textContent=title;
+  const excerpt=content.replace(/[#*\`>]/g,'').substring(0,150);
+  document.getElementById('previewDesc').textContent=excerpt||'Description preview...';
+  const msg=customMsg||title;
+  document.getElementById('previewMsg').textContent=msg+' '+(hashtags||'');
+  document.getElementById('socialPreview').style.display='block';
+  if(imgFile){const url=URL.createObjectURL(imgFile);document.getElementById('previewImage').style.display='block';document.getElementById('previewImage').style.backgroundImage='url('+url+')'}else{document.getElementById('previewImage').style.display='none'}
+}
+async function createPost(e){e.preventDefault();const title=document.getElementById('title').value;const content=document.getElementById('content').value;const hashtags=document.getElementById('hashtags').value;const customMsg=document.getElementById('customMessage').value;const imageFile=document.getElementById('image').files[0];const pubBluesky=document.getElementById('pubBluesky').checked;const pubTwitter=document.getElementById('pubTwitter').checked;const fd=new FormData();fd.append('title',title);fd.append('content',content);fd.append('hashtags',hashtags);if(imageFile)fd.append('image',imageFile);const r=await fetch('/api/posts',{method:'POST',headers:{'Authorization':'Bearer '+token},body:fd});if(r.ok){const d=await r.json();const platforms=[];if(pubBluesky)platforms.push('bluesky');if(pubTwitter)platforms.push('twitter');if(platforms.length>0){await fetch('/api/publish',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify({postSlug:d.slug,platforms,message:customMsg||undefined})})}alert('Published! '+d.public_url);window.open(d.public_url,'_blank');document.getElementById('title').value='';document.getElementById('content').value='';document.getElementById('hashtags').value='';document.getElementById('customMessage').value='';document.getElementById('image').value='';document.getElementById('socialPreview').style.display='none'}else{alert('Error: '+(await r.json()).error)}}
 `;
-  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Editor | MAB-MyBlog</title><style>:root{--bg:#0a0a0f;--surface:#1a1a2e;--border:#2a2a3e;--text:#e0e0e0;--text2:#888;--accent:#e94560;--radius:8px}body{font-family:-apple-system,sans-serif;background:var(--bg);color:var(--text);margin:0;min-height:100vh}.container{max-width:700px;margin:0 auto;padding:2rem}input,textarea{width:100%;padding:.75rem;margin:.5rem 0 1rem;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:var(--radius);font-family:inherit;box-sizing:border-box}textarea{resize:vertical;min-height:300px;font-family:monospace;font-size:.9rem}button{background:var(--accent);color:#fff;border:none;padding:.75rem 2rem;border-radius:var(--radius);cursor:pointer;font-size:1rem}button:hover{background:#ff6b6b}.form-group{margin-bottom:1rem}.form-group label{display:block;margin-bottom:.25rem;font-weight:500;font-size:.9rem;color:var(--text)}.form-group input[type="file"]{padding:.5rem;color:var(--text2)}.login-form{max-width:400px;margin:4rem auto}h1{color:var(--accent)}${sb.css}</style></head><body>${sb.html}<div class="container">${content}</div><script>${sb.js}${editorJS}</script></body></html>`;
+  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Editor | MAB-MyBlog</title><style>:root{--bg:#0a0a0f;--surface:#1a1a2e;--border:#2a2a3e;--text:#e0e0e0;--text2:#888;--accent:#e94560;--radius:8px}body{font-family:-apple-system,sans-serif;background:var(--bg);color:var(--text);margin:0;min-height:100vh}.container{max-width:700px;margin:0 auto;padding:2rem}input,textarea{width:100%;padding:.75rem;margin:.5rem 0 1rem;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:var(--radius);font-family:inherit;box-sizing:border-box}textarea{resize:vertical;min-height:300px;font-family:monospace;font-size:.9rem}input[type="file"]{padding:.5rem;color:var(--text2)}button{background:var(--accent);color:#fff;border:none;padding:.75rem 2rem;border-radius:var(--radius);cursor:pointer;font-size:1rem}button:hover{background:#ff6b6b}.form-group{margin-bottom:1rem}.form-group label{display:block;margin-bottom:.25rem;font-weight:500;font-size:.9rem;color:var(--text)}.login-form{max-width:400px;margin:4rem auto}h1{color:var(--accent)}${sb.css}</style></head><body>${sb.html}<div class="container">${content}</div><script>${sb.js}${editorJS}</script></body></html>`;
   return new Response(html, { headers: { 'Content-Type': 'text/html' } });
 }
 
@@ -214,7 +251,7 @@ async function processSchedules(env) {
     for (const p of platforms) {
       try {
         let r;
-        if (p === 'bluesky') r = await publishToBluesky({ message: `${msg} ${hashtags}`.trim(), articleUrl, title: s.title, excerpt: s.excerpt }, env);
+        if (p === 'bluesky') r = await publishToBluesky({ message: `${msg} ${hashtags}`.trim(), articleUrl, title: s.title, excerpt: s.excerpt, ogImage: s.image_url }, env);
         else if (p === 'twitter') r = await publishToTwitter(`${msg} ${hashtags}\n\n${articleUrl}`.trim(), env);
         if (r) await env.DB.prepare('INSERT INTO publication_history (post_slug,schedule_id,platform,platform_post_id,message_used,is_republish) VALUES (?,?,?,?,?,1)').bind(s.post_slug, s.id, r.platform, r.id, msg).run();
       } catch (e) { console.error(`Schedule ${s.id} failed:`, e); }
@@ -332,7 +369,7 @@ export default {
         for (const platform of platforms) {
           try {
             let result;
-            if (platform === 'bluesky') result = await publishToBluesky({ message: message || post.title, articleUrl, title: post.title, excerpt: post.excerpt }, env);
+            if (platform === 'bluesky') result = await publishToBluesky({ message: message || post.title, articleUrl, title: post.title, excerpt: post.excerpt, ogImage: post.image_url }, env);
             else if (platform === 'twitter') result = await publishToTwitter(`${message || post.title}\n\n${articleUrl}`, env);
             if (result) { await env.DB.prepare("INSERT INTO social_shares (post_slug,platform,platform_post_id,platform_post_url,status) VALUES (?,?,?,?,'published')").bind(postSlug, result.platform, result.id, result.url || '').run(); results.push({ platform, success: true, id: result.id }); }
           } catch (e) { results.push({ platform, success: false, error: e.message }); }
