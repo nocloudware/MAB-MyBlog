@@ -1,10 +1,12 @@
 .wrangler/
+node_modules/
 body.json
 body.txt
 cookies.txt
+estructura.txt
 header.txt
-proyecto_completo.txt
 secrets.txt
-all.txt
-*.bat
 *.ps1
+*.bat
+.verify
+*.log
