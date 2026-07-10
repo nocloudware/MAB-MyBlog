@@ -278,7 +278,7 @@ export default {
         const metaJson = JSON.stringify({ title, author, slug, tags, excerpt, date: date.toISOString(), word_count: wordCount, reading_time: readingTime });
         const assets = [{ name: 'article.md', content: articleMd, content_type: 'text/markdown' }, { name: 'meta.json', content: metaJson, content_type: 'application/json' }];
         if (imageFile) assets.push({ name: 'featured.webp', content: imageFile, content_type: 'image/webp' });
-        const ghToken = await getEffectiveToken(env, 'GITHUB');
+        const ghToken = await getEffectiveToken(env, 'GITHUB_TOKEN');
         const release = await createGitHubRelease(releaseTag, title, assets, { ...env, GITHUB_TOKEN: ghToken });
         const articleUrl = release.assets.find(a => a.name === 'article.md').browser_download_url;
         const imageUrl = release.assets.find(a => a.name === 'featured.webp')?.browser_download_url || null;
@@ -301,7 +301,7 @@ export default {
         const excerpt = getExcerpt(content), wordCount = countWords(content), readingTime = readingTimeMinutes(wordCount);
         const assets = [{ name: 'article.md', content, content_type: 'text/markdown' }, { name: 'meta.json', content: JSON.stringify({ title, slug, excerpt, updated_at: new Date().toISOString(), word_count: wordCount, reading_time: readingTime }), content_type: 'application/json' }];
         if (imageFile) assets.push({ name: 'featured.webp', content: imageFile, content_type: 'image/webp' });
-        const ghToken = await getEffectiveToken(env, 'GITHUB');
+        const ghToken = await getEffectiveToken(env, 'GITHUB_TOKEN');
         const release = await createGitHubRelease(releaseTag, title, assets, { ...env, GITHUB_TOKEN: ghToken });
         const articleUrl = release.assets.find(a => a.name === 'article.md').browser_download_url;
         const imageUrl = release.assets.find(a => a.name === 'featured.webp')?.browser_download_url || post.image_url_cache;
