@@ -140,3 +140,18 @@ INSERT OR IGNORE INTO hashtag_templates (name, template, day_of_week, is_default
     ('Thursday', '#Thursday #AlmostThere', 4, 1),
     ('Friday', '#Friday #Weekend', 5, 1),
     ('Saturday', '#Saturday #Relax #Reading', 6, 1);
+
+-- Estadísticas de publicaciones en redes sociales
+CREATE TABLE IF NOT EXISTS post_stats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    share_id INTEGER NOT NULL,
+    likes INTEGER DEFAULT 0,
+    reposts INTEGER DEFAULT 0,
+    replies INTEGER DEFAULT 0,
+    quotes INTEGER DEFAULT 0,
+    fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (share_id) REFERENCES social_shares(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_stats_share ON post_stats(share_id);
+CREATE INDEX IF NOT EXISTS idx_stats_fetched ON post_stats(fetched_at);

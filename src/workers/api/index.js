@@ -49,6 +49,78 @@ async function generateJWT(env) {
   return `${btoa(payload)}.${sigBase64}`;
 }
 
+// ============ STATS HELPERS ============
+function shouldRefresh(fetchedAt, postCreatedAt) {
+  const now = new Date();
+  const postAge = (now - new Date(postCreatedAt)) / (1000 * 60 * 60 * 24);
+  if (!fetchedAt) return true;
+  const lastFetch = new Date(fetchedAt);
+  const hoursSinceLastFetch = (now - lastFetch) / (1000 * 60 * 60);
+  if (postAge < 1) return hoursSinceLastFetch > 0.25;
+  if (postAge < 2) return hoursSinceLastFetch > 1;
+  if (postAge < 3) return hoursSinceLastFetch > 2;
+  if (postAge < 7) return hoursSinceLastFetch > 6;
+  if (postAge < 30) return hoursSinceLastFetch > 24;
+  return hoursSinceLastFetch > 72;
+}
+
+async function fetchBlueskyStats(rkey, env) {
+  const row = await env.DB.prepare("SELECT encrypted_payload FROM social_tokens WHERE platform='bluesky'").first();
+  if (!row) return null;
+  const creds = JSON.parse(await decrypt(row.encrypted_payload, env));
+  const session = await createBlueskySession(creds.identifier, creds.appPassword);
+  const uri = `at://${session.did}/app.bsky.feed.post/${rkey}`;
+  const res = await fetch(`https://bsky.social/xrpc/app.bsky.feed.getPostThread?uri=${encodeURIComponent(uri)}&depth=0`, {
+    headers: { 'Authorization': `Bearer ${session.accessJwt}` }
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  const post = data.thread?.post;
+  if (!post) return null;
+  return { likes: post.likeCount || 0, reposts: post.repostCount || 0, replies: post.replyCount || 0, quotes: post.quoteCount || 0 };
+}
+
+async function fetchTwitterStats(tweetId, env) {
+  const row = await env.DB.prepare("SELECT encrypted_payload FROM social_tokens WHERE platform='twitter'").first();
+  if (!row) return null;
+  const creds = JSON.parse(await decrypt(row.encrypted_payload, env));
+  const auth = await buildOAuth1Header('GET', `https://api.twitter.com/2/tweets/${tweetId}?tweet.fields=public_metrics`, creds);
+  const res = await fetch(`https://api.twitter.com/2/tweets/${tweetId}?tweet.fields=public_metrics`, {
+    headers: { 'Authorization': auth }
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  const metrics = data.data?.public_metrics;
+  if (!metrics) return null;
+  return { likes: metrics.like_count || 0, reposts: metrics.retweet_count || 0, replies: metrics.reply_count || 0, quotes: metrics.quote_count || 0 };
+}
+
+async function buildOAuth1Header(method, url, creds) {
+  const pct = s => encodeURIComponent(s);
+  const params = {
+    oauth_consumer_key: creds.apiKey,
+    oauth_nonce: crypto.randomUUID().replace(/-/g, ''),
+    oauth_signature_method: 'HMAC-SHA1',
+    oauth_timestamp: Math.floor(Date.now() / 1000).toString(),
+    oauth_token: creds.accessToken,
+    oauth_version: '1.0'
+  };
+  const sorted = Object.keys(params).sort();
+  const paramStr = sorted.map(k => `${pct(k)}=${pct(params[k])}`).join('&');
+  const base = [method, pct(url), pct(paramStr)].join('&');
+  const sigKey = `${pct(creds.apiSecret)}&${pct(creds.accessSecret)}`;
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(sigKey), { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(base));
+  params.oauth_signature = btoa(String.fromCharCode(...new Uint8Array(sig)));
+  return 'OAuth ' + Object.keys(params).map(k => `${pct(k)}="${pct(params[k])}"`).join(', ');
+}
+
+async function saveStats(shareId, stats, env) {
+  if (!stats) return;
+  await env.DB.prepare('INSERT INTO post_stats (share_id, likes, reposts, replies, quotes) VALUES (?,?,?,?,?)')
+    .bind(shareId, stats.likes, stats.reposts, stats.replies, stats.quotes).run();
+}
+
 // ============ SHARED UI ============
 function buildSidebar() {
   return {
@@ -126,6 +198,16 @@ function buildSidebar() {
     </div>
     <div class="sidebar-divider"></div>
     <div class="sidebar-section">
+      <div class="section-title">📊 Stats</div>
+      <div style="display:flex;gap:.3rem;margin-bottom:.5rem;align-items:center;font-size:.75rem">
+        <input type="number" id="statsDays" value="1" min="0" style="width:45px;text-align:center;padding:.3rem"> days
+        <input type="number" id="statsMonths" value="0" min="0" style="width:45px;text-align:center;padding:.3rem"> months
+        <input type="number" id="statsYears" value="0" min="0" style="width:45px;text-align:center;padding:.3rem"> years
+      </div>
+      <button class="btn-sm btn-outline" onclick="refreshStats()">🔄 Refresh Stats</button> <span id="statsStatus" style="font-size:.7rem"></span>
+    </div>
+    <div class="sidebar-divider"></div>
+    <div class="sidebar-section">
       <div class="section-title">📝 Blog</div>
       <div class="form-group"><label>Blog Name</label><input type="text" id="blogName"></div>
       <div class="form-group"><label>Default Author</label><input type="text" id="defaultAuthor"></div>
@@ -173,6 +255,15 @@ async function loadSettings(){try{const r=await fetch('/api/settings',{headers:{
 async function publishToSocial(slug,platform){if(!_token){alert('Login required');return}const r=await fetch('/api/publish',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+_token},body:JSON.stringify({postSlug:slug,platforms:[platform]})});if(r.ok){const d=await r.json();if(d.results[0]&&d.results[0].success){alert('Published to '+platform+'!');location.reload()}else{alert('Failed: '+(d.results[0]?.error||'Unknown error'))}}else{alert('Error publishing')}}
 async function editPost(slug){window.location.href='/editor?edit='+slug}
 async function deletePost(slug){if(!confirm('Delete this article? It will also be removed from all social networks.'))return;const r=await fetch('/api/posts/'+slug,{method:'DELETE',headers:{'Authorization':'Bearer '+_token}});if(r.ok){alert('Deleted!');location.reload()}else{alert('Error deleting')}}
+async function refreshStats(){
+  const d=document.getElementById('statsDays').value;
+  const m=document.getElementById('statsMonths').value;
+  const y=document.getElementById('statsYears').value;
+  document.getElementById('statsStatus').textContent='...';
+  const r=await fetch('/api/stats/refresh?days='+d+'&months='+m+'&years='+y,{headers:{'Authorization':'Bearer '+_token}});
+  if(r.ok){const j=await r.json();document.getElementById('statsStatus').textContent='✓ '+j.refreshed+'/'+j.checked}
+  else{document.getElementById('statsStatus').textContent='✗ Error'}
+}
 updateAuthUI();
 `
   };
@@ -184,13 +275,24 @@ async function renderHome(env) {
   const { results: posts } = await env.DB.prepare(`SELECT p.slug, p.title, p.author, p.created_at, v.excerpt, v.image_url, v.reading_time FROM posts p JOIN post_versions v ON p.slug=v.slug AND p.current_version=v.version WHERE p.status='published' ORDER BY p.created_at DESC LIMIT 20`).all();
   const slugs = posts.map(p => `'${p.slug}'`).join(',');
   let shareCounts = {};
+  let statsTotals = {};
   if (slugs) {
     const { results: counts } = await env.DB.prepare(`SELECT post_slug, platform, COUNT(*) as cnt FROM social_shares WHERE post_slug IN (${slugs}) AND status='published' GROUP BY post_slug, platform`).all();
     for (const c of counts) { if (!shareCounts[c.post_slug]) shareCounts[c.post_slug] = {}; shareCounts[c.post_slug][c.platform] = c.cnt; }
+    const { results: stats } = await env.DB.prepare(`SELECT ss.post_slug, ss.platform, ps.likes, ps.reposts FROM social_shares ss JOIN post_stats ps ON ps.id = (SELECT id FROM post_stats WHERE share_id = ss.id ORDER BY fetched_at DESC LIMIT 1) WHERE ss.post_slug IN (${slugs}) AND ss.status='published'`).all();
+    for (const s of stats) {
+      if (!statsTotals[s.post_slug]) statsTotals[s.post_slug] = {};
+      if (!statsTotals[s.post_slug][s.platform]) statsTotals[s.post_slug][s.platform] = { likes: 0, reposts: 0 };
+      statsTotals[s.post_slug][s.platform].likes += (s.likes || 0);
+      statsTotals[s.post_slug][s.platform].reposts += (s.reposts || 0);
+    }
   }
   const cards = posts.map(p => {
     const sc = shareCounts[p.slug] || {};
-    return `<article class="post-card">${p.image_url?`<img src="${p.image_url}" alt="">`:''}<div style="flex:1"><h2><a href="/post/${p.slug}">${escapeHtml(p.title)}</a></h2><div class="post-author">by ${escapeHtml(p.author||'Author')}</div><div class="post-excerpt">${escapeHtml(p.excerpt||'')}</div><div class="share-counts"><span>🦋 ${sc.bluesky||0}</span><span>𝕏 ${sc.twitter||0}</span><span>📅 ${formatDate(p.created_at)}</span><span>⏱️ ${p.reading_time} min</span></div></div><div class="post-actions" style="display:none"><button onclick="publishToSocial('${p.slug}','bluesky')">🦋 Bluesky</button><button onclick="publishToSocial('${p.slug}','twitter')">𝕏 Twitter</button><button class="btn-edit" onclick="editPost('${p.slug}')">✏️ Edit</button><button class="btn-delete" onclick="deletePost('${p.slug}')">🗑️ Delete</button></div></article>`;
+    const st = statsTotals[p.slug] || {};
+    const bsStats = st.bluesky || { likes: 0, reposts: 0 };
+    const twStats = st.twitter || { likes: 0, reposts: 0 };
+    return `<article class="post-card">${p.image_url?`<img src="${p.image_url}" alt="">`:''}<div style="flex:1"><h2><a href="/post/${p.slug}">${escapeHtml(p.title)}</a></h2><div class="post-author">by ${escapeHtml(p.author||'Author')}</div><div class="post-excerpt">${escapeHtml(p.excerpt||'')}</div><div class="share-counts"><span>🦋 ${sc.bluesky||0} (💗${bsStats.likes} 🔁${bsStats.reposts})</span><span>𝕏 ${sc.twitter||0} (💗${twStats.likes} 🔁${twStats.reposts})</span><span>📅 ${formatDate(p.created_at)}</span><span>⏱️ ${p.reading_time} min</span></div></div><div class="post-actions" style="display:none"><button onclick="publishToSocial('${p.slug}','bluesky')">🦋 Bluesky</button><button onclick="publishToSocial('${p.slug}','twitter')">𝕏 Twitter</button><button class="btn-edit" onclick="editPost('${p.slug}')">✏️ Edit</button><button class="btn-delete" onclick="deletePost('${p.slug}')">🗑️ Delete</button></div></article>`;
   }).join('');
   const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>${escapeHtml(env.BLOG_NAME||'My Blog')}</title><meta property="og:title" content="${escapeHtml(env.BLOG_NAME||'My Blog')}"><meta property="og:type" content="website"><link rel="canonical" href="${env.BASE_URL}"><style>:root{--bg:#0a0a0f;--surface:#1a1a2e;--text:#e0e0e0;--text2:#888;--accent:#e94560}body{font-family:-apple-system,sans-serif;background:var(--bg);color:var(--text);margin:0;min-height:100vh}.container{max-width:800px;margin:0 auto;padding:2rem}h1{font-size:2.2rem;margin-bottom:.25rem;color:var(--accent)}.blog-subtitle{color:var(--text2);margin-bottom:2rem;font-size:.9rem}a{color:var(--accent);text-decoration:none}.new-post-link{display:inline-block;margin-bottom:2rem;padding:.5rem 1rem;background:var(--accent);color:#fff;border-radius:6px;font-size:.85rem}.post-card{background:var(--surface);border-radius:12px;padding:1.5rem;margin-bottom:1.5rem;display:flex;gap:1.5rem;align-items:center}.post-card img{width:120px;height:80px;object-fit:cover;border-radius:8px;flex-shrink:0}.post-card h2{margin:0 0 .15rem}.post-author{color:var(--text2);font-size:.8rem;margin-bottom:.25rem}.post-excerpt{color:var(--text2);font-size:.85rem;margin:.25rem 0}.share-counts{display:flex;gap:1rem;font-size:.75rem;color:var(--text2);margin-top:.3rem}.post-actions{display:flex;flex-direction:column;gap:.4rem;flex-shrink:0}.post-actions button{background:var(--surface);border:1px solid var(--border);color:var(--text2);padding:.3rem .6rem;border-radius:6px;cursor:pointer;font-size:.7rem;white-space:nowrap}.post-actions button:hover{border-color:var(--accent);color:var(--accent)}.post-actions .btn-edit:hover{border-color:#4caf50;color:#4caf50}.post-actions .btn-delete:hover{border-color:#f44336;color:#f44336}${sb.css}</style></head><body>${sb.html}<div class="container"><h1>${escapeHtml(env.BLOG_NAME||'My Blog')}</h1><p class="blog-subtitle">by ${escapeHtml((await env.DB.prepare("SELECT value FROM settings WHERE key='author_name'").first())?.value||'Author')}</p><a href="/editor" class="new-post-link" id="newPostLink" style="display:none">✍ New Post</a>${cards}</div><script>${sb.js}</script></body></html>`;
   return new Response(html, { headers: { 'Content-Type': 'text/html' } });
@@ -211,8 +313,17 @@ async function renderPostPage(slug, requestedVersion, env) {
     const res = await fetch(v.article_url); const md = await res.text(); const { body } = parseFrontmatter(md);
     const contentHTML = markdownToHTML(body); const isLatest = !requestedVersion; const title = v.post_title || slug;
     const ogImage = v.image_url || ''; const ogDesc = escapeHtml(v.excerpt||'');
-    const content = `${!isLatest?`<div class="old">Viewing v${v.version}. <a href="/post/${slug}">See latest</a></div>`:''}${v.image_url?`<img src="${v.image_url}" alt="${escapeHtml(title)}" class="featured-image">`:''}<h1>${escapeHtml(title)}</h1><div class="meta">${v.reading_time} min read · v${v.version}</div><div>${contentHTML}</div><p style="margin-top:3rem"><a href="/">← Back to blog</a></p>`;
-    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>${escapeHtml(title)} | ${escapeHtml(env.BLOG_NAME||'Blog')}</title><meta name="description" content="${ogDesc}"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${ogDesc}"><meta property="og:image" content="${ogImage}"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:url" content="${env.BASE_URL}/post/${slug}"><meta property="og:type" content="article"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="${escapeHtml(title)}"><meta name="twitter:description" content="${ogDesc}"><meta name="twitter:image" content="${ogImage}"><link rel="canonical" href="${env.BASE_URL}/post/${slug}"><style>:root{--bg:#0a0a0f;--surface:#1a1a2e;--text:#e0e0e0;--text2:#888;--accent:#e94560}body{font-family:-apple-system,sans-serif;background:var(--bg);color:var(--text);margin:0;min-height:100vh}.container{max-width:800px;margin:0 auto;padding:2rem}h1{font-size:2.2rem;margin-bottom:.5rem;color:var(--accent)}a{color:var(--accent);text-decoration:none}img{max-width:100%;border-radius:12px;margin:1.5rem 0}blockquote{border-left:3px solid var(--accent);padding:.5rem 1rem;color:var(--text2);font-style:italic}code{background:var(--surface);padding:.2rem .5rem;border-radius:4px}pre{background:var(--surface);padding:1.5rem;border-radius:8px;overflow-x:auto}pre code{background:none;padding:0}.featured-image{width:100%;max-height:400px;object-fit:cover;border-radius:12px;margin-bottom:1.5rem}.meta{color:var(--text2);font-size:.9rem;margin-bottom:1.5rem}.old{background:rgba(255,152,0,.1);padding:1rem;border-radius:8px;margin-bottom:1.5rem}${sb.css}</style></head><body>${sb.html}<div class="container">${content}</div><script>${sb.js}</script></body></html>`;
+    const { results: shares } = await env.DB.prepare(`SELECT ss.*, (SELECT likes FROM post_stats WHERE share_id = ss.id ORDER BY fetched_at DESC LIMIT 1) as likes, (SELECT reposts FROM post_stats WHERE share_id = ss.id ORDER BY fetched_at DESC LIMIT 1) as reposts, (SELECT replies FROM post_stats WHERE share_id = ss.id ORDER BY fetched_at DESC LIMIT 1) as replies FROM social_shares ss WHERE ss.post_slug = ? AND ss.status = 'published' ORDER BY ss.shared_at DESC`).bind(slug).all();
+    let statsHTML = '';
+    if (shares.length > 0) {
+      statsHTML = `<details style="margin:2rem 0;background:var(--surface);border-radius:8px;padding:1rem"><summary style="cursor:pointer;font-weight:600">📊 Social Stats (${shares.length} posts)</summary><div style="margin-top:1rem">`;
+      for (const s of shares) {
+        statsHTML += `<div style="display:flex;justify-content:space-between;align-items:center;padding:.5rem 0;border-bottom:1px solid var(--border);font-size:.85rem"><span>${s.platform==='bluesky'?'🦋':'𝕏'} ${new Date(s.shared_at).toLocaleDateString()}</span><span>💗 ${s.likes||0} 🔁 ${s.reposts||0} 💬 ${s.replies||0}</span><a href="${s.platform_post_url||'#'}" target="_blank" style="font-size:.7rem;color:var(--accent)">view</a></div>`;
+      }
+      statsHTML += `</div></details>`;
+    }
+    const content = `${!isLatest?`<div class="old">Viewing v${v.version}. <a href="/post/${slug}">See latest</a></div>`:''}${v.image_url?`<img src="${v.image_url}" alt="${escapeHtml(title)}" class="featured-image">`:''}<h1>${escapeHtml(title)}</h1><div class="meta">${v.reading_time} min read · v${v.version}</div><div>${contentHTML}</div>${statsHTML}<p style="margin-top:3rem"><a href="/">← Back to blog</a></p>`;
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>${escapeHtml(title)} | ${escapeHtml(env.BLOG_NAME||'Blog')}</title><meta name="description" content="${ogDesc}"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${ogDesc}"><meta property="og:image" content="${ogImage}"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:url" content="${env.BASE_URL}/post/${slug}"><meta property="og:type" content="article"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="${escapeHtml(title)}"><meta name="twitter:description" content="${ogDesc}"><meta name="twitter:image" content="${ogImage}"><link rel="canonical" href="${env.BASE_URL}/post/${slug}"><style>:root{--bg:#0a0a0f;--surface:#1a1a2e;--text:#e0e0e0;--text2:#888;--accent:#e94560}body{font-family:-apple-system,sans-serif;background:var(--bg);color:var(--text);margin:0;min-height:100vh}.container{max-width:800px;margin:0 auto;padding:2rem}h1{font-size:2.2rem;margin-bottom:.5rem;color:var(--accent)}a{color:var(--accent);text-decoration:none}img{max-width:100%;border-radius:12px;margin:1.5rem 0}blockquote{border-left:3px solid var(--accent);padding:.5rem 1rem;color:var(--text2);font-style:italic}code{background:var(--surface);padding:.2rem .5rem;border-radius:4px}pre{background:var(--surface);padding:1.5rem;border-radius:8px;overflow-x:auto}pre code{background:none;padding:0}.featured-image{width:100%;max-height:400px;object-fit:cover;border-radius:12px;margin-bottom:1.5rem}.meta{color:var(--text2);font-size:.9rem;margin-bottom:1.5rem}.old{background:rgba(255,152,0,.1);padding:1rem;border-radius:8px;margin-bottom:1.5rem}details summary:hover{color:var(--accent)}${sb.css}</style></head><body>${sb.html}<div class="container">${content}</div><script>${sb.js}</script></body></html>`;
     return new Response(html, { headers: { 'Content-Type': 'text/html', 'Cache-Control': isLatest ? 'public, max-age=3600' : 'public, max-age=31536000, immutable' } });
   } catch { return new Response('Temporarily unavailable', { status: 503 }); }
 }
@@ -270,6 +381,8 @@ statusEl.textContent='Done!';const pubUrl=editSlug?'/post/'+editSlug:(d.public_u
 // ============ SCHEDULER ============
 async function processSchedules(env) {
   const now = new Date().toISOString();
+  
+  // Process publication schedules
   const { results: due } = await env.DB.prepare(`SELECT ps.*, p.title, v.article_url, v.image_url, v.excerpt FROM publication_schedules ps JOIN posts p ON p.slug=ps.post_slug AND p.status='published' JOIN post_versions v ON v.slug=p.slug AND v.version=p.current_version WHERE ps.status='active' AND ps.next_occurrence<=? AND (ps.max_occurrences IS NULL OR ps.occurrence_count<ps.max_occurrences) ORDER BY ps.next_occurrence ASC LIMIT 5`).bind(now).all();
   for (const s of due) {
     const platforms = JSON.parse(s.platforms); const hashtags = processHashtags(s.custom_hashtags); const articleUrl = `${env.BASE_URL}/post/${s.post_slug}`; const msg = s.message_template || s.title;
@@ -278,6 +391,24 @@ async function processSchedules(env) {
     }
     const nc = s.occurrence_count + 1; let next = null, st = 'active'; if (s.schedule_type === 'once') st = 'completed'; else if (s.max_occurrences && nc >= s.max_occurrences) st = 'completed'; else if (s.recurrence_interval && s.recurrence_unit) next = calculateNextOccurrence(new Date(), s.recurrence_interval, s.recurrence_unit).toISOString();
     await env.DB.prepare('UPDATE publication_schedules SET occurrence_count=?,next_occurrence=?,status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').bind(nc, next, st, s.id).run();
+  }
+  
+  // Refresh stats
+  const { results: recentShares } = await env.DB.prepare(`
+    SELECT ss.*, p.created_at as post_created_at,
+           (SELECT fetched_at FROM post_stats WHERE share_id = ss.id ORDER BY fetched_at DESC LIMIT 1) as last_fetch
+    FROM social_shares ss
+    JOIN posts p ON p.slug = ss.post_slug
+    WHERE ss.status = 'published'
+  `).all();
+  for (const share of recentShares) {
+    if (!shouldRefresh(share.last_fetch, share.post_created_at)) continue;
+    try {
+      let stats = null;
+      if (share.platform === 'bluesky') stats = await fetchBlueskyStats(share.platform_post_id, env);
+      else if (share.platform === 'twitter') stats = await fetchTwitterStats(share.platform_post_id, env);
+      if (stats) await saveStats(share.id, stats, env);
+    } catch (e) { console.error(`Stats refresh failed for ${share.platform}:`, e); }
   }
 }
 
@@ -294,6 +425,34 @@ export default {
     if (method === 'GET' && path === '/api/posts') { const { results } = await env.DB.prepare(`SELECT p.slug,p.title,p.author,p.status,p.created_at,v.excerpt,v.image_url,v.word_count,v.reading_time FROM posts p JOIN post_versions v ON p.slug=v.slug AND p.current_version=v.version WHERE p.status='published' ORDER BY p.created_at DESC`).all(); return json({ posts: results }); }
     if (method === 'GET' && path.match(/^\/api\/posts\/[a-z0-9-]+$/)) { const slug = path.split('/').pop(); const post = await env.DB.prepare(`SELECT p.*,v.article_url,v.image_url,v.meta_url,v.excerpt,v.word_count,v.reading_time FROM posts p JOIN post_versions v ON p.slug=v.slug AND p.current_version=v.version WHERE p.slug=? AND p.status='published'`).bind(slug).first(); if (!post) return json({ error: 'Not found' }, 404); try { const res = await fetch(post.article_url); const { body } = parseFrontmatter(await res.text()); return json({ slug: post.slug, title: post.title, author: post.author, content: body, excerpt: post.excerpt, image_url: post.image_url, word_count: post.word_count, reading_time: post.reading_time, created_at: post.created_at, version: post.current_version }); } catch { return json({ slug: post.slug, title: post.title, excerpt: post.excerpt }); } }
     if (method === 'POST' && path === '/api/auth/login') { const { password } = await request.json(); if (password !== env.ADMIN_PASSWORD) return json({ error: 'Unauthorized' }, 401); return json({ success: true, token: await generateJWT(env) }); }
+    
+    // Stats refresh endpoint
+    if (method === 'GET' && path === '/api/stats/refresh') {
+      const days = parseInt(url.searchParams.get('days') || '1');
+      const months = parseInt(url.searchParams.get('months') || '0');
+      const years = parseInt(url.searchParams.get('years') || '0');
+      const sinceDate = new Date();
+      sinceDate.setDate(sinceDate.getDate() - days);
+      sinceDate.setMonth(sinceDate.getMonth() - months);
+      sinceDate.setFullYear(sinceDate.getFullYear() - years);
+      const { results: shares } = await env.DB.prepare(`
+        SELECT ss.*, p.created_at as post_created_at
+        FROM social_shares ss
+        JOIN posts p ON p.slug = ss.post_slug
+        WHERE ss.status = 'published' AND p.created_at >= ?
+      `).bind(sinceDate.toISOString()).all();
+      let refreshed = 0;
+      for (const share of shares) {
+        try {
+          let stats = null;
+          if (share.platform === 'bluesky') stats = await fetchBlueskyStats(share.platform_post_id, env);
+          else if (share.platform === 'twitter') stats = await fetchTwitterStats(share.platform_post_id, env);
+          if (stats) { await saveStats(share.id, stats, env); refreshed++; }
+        } catch (e) { console.error(`Stats failed for ${share.platform}:`, e); }
+      }
+      return json({ success: true, refreshed, checked: shares.length, since: sinceDate.toISOString() });
+    }
+    
     if (method === 'POST' && path === '/api/posts') { try { const { title, content, author, hashtags, tags, imageFile } = await extractPostParams(request); if (!title || !content) return json({ error: 'Title and content required' }, 400); const slug = generateSlug(title); if (await env.DB.prepare('SELECT slug FROM posts WHERE slug=?').bind(slug).first()) return json({ error: 'Already exists' }, 409); const date = new Date(), version = 1, releaseTag = `post/${slug}/v${version}`; const excerpt = getExcerpt(content), wordCount = countWords(content), readingTime = readingTimeMinutes(wordCount); const articleMd = `---\ntitle:"${title}"\nauthor:"${author}"\ndate:"${date.toISOString()}"\nslug:"${slug}"\ntags:${JSON.stringify(tags)}\n---\n\n${content}`; const metaJson = JSON.stringify({ title, author, slug, tags, excerpt, date: date.toISOString(), word_count: wordCount, reading_time: readingTime }); const assets = [{ name: 'article.md', content: articleMd, content_type: 'text/markdown' }, { name: 'meta.json', content: metaJson, content_type: 'application/json' }]; if (imageFile) assets.push({ name: 'featured.webp', content: imageFile, content_type: 'image/webp' }); const ghToken = await getEffectiveToken(env, 'GITHUB_TOKEN'); const release = await createGitHubRelease(releaseTag, title, assets, { ...env, GITHUB_TOKEN: ghToken }); const articleUrl = release.assets.find(a => a.name === 'article.md').browser_download_url; const imageUrl = release.assets.find(a => a.name === 'featured.webp')?.browser_download_url || null; await env.DB.batch([env.DB.prepare("INSERT INTO posts (slug,current_release_id,current_version,title,author,excerpt_cache,image_url_cache,status,default_hashtags) VALUES (?,?,?,?,?,?,?,'published',?)").bind(slug, release.id.toString(), version, title, author, excerpt, imageUrl, hashtags), env.DB.prepare("INSERT INTO post_versions (slug,version,release_id,release_tag,release_url,article_url,image_url,meta_url,excerpt,word_count,reading_time,change_description) VALUES (?,?,?,?,?,?,?,?,?,?,?,'Initial version')").bind(slug, version, release.id.toString(), releaseTag, release.html_url, articleUrl, imageUrl, release.assets.find(a => a.name === 'meta.json').browser_download_url, excerpt, wordCount, readingTime)]); return json({ success: true, slug, version, public_url: `${env.BASE_URL}/post/${slug}`, article_url: articleUrl, image_url: imageUrl }); } catch (e) { return json({ error: e.message }, 500); } }
     if (method === 'PUT' && path.match(/^\/api\/posts\/[a-z0-9-]+$/)) { try { const slug = path.split('/').pop(); const { title: nt, content, imageFile } = await extractPostParams(request); const post = await env.DB.prepare('SELECT * FROM posts WHERE slug=?').bind(slug).first(); if (!post) return json({ error: 'Not found' }, 404); if (!content) return json({ error: 'Content required' }, 400); const title = nt || post.title, newVersion = post.current_version + 1, releaseTag = `post/${slug}/v${newVersion}`; const excerpt = getExcerpt(content), wordCount = countWords(content), readingTime = readingTimeMinutes(wordCount); const assets = [{ name: 'article.md', content, content_type: 'text/markdown' }, { name: 'meta.json', content: JSON.stringify({ title, slug, excerpt, updated_at: new Date().toISOString(), word_count: wordCount, reading_time: readingTime }), content_type: 'application/json' }]; if (imageFile) assets.push({ name: 'featured.webp', content: imageFile, content_type: 'image/webp' }); const ghToken = await getEffectiveToken(env, 'GITHUB_TOKEN'); const release = await createGitHubRelease(releaseTag, title, assets, { ...env, GITHUB_TOKEN: ghToken }); const articleUrl = release.assets.find(a => a.name === 'article.md').browser_download_url; const imageUrl = release.assets.find(a => a.name === 'featured.webp')?.browser_download_url || post.image_url_cache; await env.DB.batch([env.DB.prepare('UPDATE posts SET current_release_id=?,current_version=?,title=?,image_url_cache=?,updated_at=CURRENT_TIMESTAMP WHERE slug=?').bind(release.id.toString(), newVersion, title, imageUrl, slug), env.DB.prepare('INSERT INTO post_versions (slug,version,release_id,release_tag,release_url,article_url,image_url,meta_url,excerpt,word_count,reading_time,change_description) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').bind(slug, newVersion, release.id.toString(), releaseTag, release.html_url, articleUrl, imageUrl, release.assets.find(a => a.name === 'meta.json').browser_download_url, excerpt, wordCount, readingTime, `Updated to v${newVersion}`)]); return json({ success: true, slug, version: newVersion }); } catch (e) { return json({ error: e.message }, 500); } }
     if (method === 'DELETE' && path.match(/^\/api\/posts\/[a-z0-9-]+$/)) { const slug = path.split('/').pop(); const post = await env.DB.prepare('SELECT * FROM posts WHERE slug=?').bind(slug).first(); if (!post) return json({ error: 'Not found' }, 404); const shares = await env.DB.prepare("SELECT * FROM social_shares WHERE post_slug=? AND status='published'").bind(slug).all(); for (const s of shares.results || []) { try { await deleteFromSocialPlatform(s.platform, s.platform_post_id, env); } catch {} await env.DB.prepare("UPDATE social_shares SET status='deleted' WHERE id=?").bind(s.id).run(); } await env.DB.batch([env.DB.prepare('INSERT INTO post_deletions (slug,last_release_id) VALUES (?,?)').bind(slug, post.current_release_id), env.DB.prepare("UPDATE posts SET status='deleted',updated_at=CURRENT_TIMESTAMP WHERE slug=?").bind(slug)]); return json({ success: true, deleted: slug }); }
