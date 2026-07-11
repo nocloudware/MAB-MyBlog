@@ -341,9 +341,15 @@ async function renderEditorPage(env, editSlug = null) {
   <input type="hidden" id="editSlug" value="${editSlug||''}">
   <div class="form-group"><label>Title</label><input type="text" id="title" name="title" required value="${escapeHtml(editData.title)}"></div>
   <div class="form-group"><label>Content (Markdown)</label><textarea id="content" name="content" rows="20" required oninput="updatePreview()">${escapeHtml(editData.content)}</textarea></div>
-  <div class="form-group"><label>Featured Image</label><input type="file" id="image" name="image" accept="image/*" onchange="updatePreview()">${editData.image_url?`<div style="font-size:.75rem;color:var(--text2);margin-top:.25rem">Current: <a href="${editData.image_url}" target="_blank">view</a></div>`:''}</div>
   <div class="form-group"><label>Hashtags</label><input type="text" id="hashtags" name="hashtags" maxlength="100" placeholder="#blog #writing" oninput="updatePreview()" value="${escapeHtml(editData.hashtags)}"></div>
   <div class="form-group"><label>Custom Message</label><textarea id="customMessage" name="customMessage" rows="3" maxlength="280" placeholder="Override default message..." oninput="updatePreview()" style="min-height:60px;resize:vertical"></textarea></div>
+  <div style="display:flex;gap:.5rem;margin-bottom:1rem">
+    <button type="button" onclick="importMD()" style="background:var(--surface);border:1px solid var(--border);color:var(--text2);padding:.4rem .8rem;font-size:.8rem;flex:1">📄 Import MD</button>
+    <button type="button" onclick="document.getElementById('image').click()" style="background:var(--surface);border:1px solid var(--border);color:var(--text2);padding:.4rem .8rem;font-size:.8rem;flex:1">🖼️ Add Image</button>
+    <button type="button" onclick="generateAISummary()" style="background:var(--surface);border:1px solid var(--border);color:var(--text2);padding:.4rem .8rem;font-size:.8rem;flex:1">🤖 AI Summary</button>
+  </div>
+  <input type="file" id="mdFileInput" accept=".md,.txt" style="display:none" onchange="handleMDFile(event)">
+  <input type="file" id="image" name="image" accept="image/*" style="display:none" onchange="updatePreview()">${editData.image_url?`<div style="font-size:.75rem;color:var(--text2);margin-top:.25rem">Current image: <a href="${editData.image_url}" target="_blank">view</a></div>`:''}
   <div style="display:flex;gap:2rem;margin-bottom:1rem">
     <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer"><input type="checkbox" id="pubBluesky"> 🦋 Bluesky</label>
     <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer"><input type="checkbox" id="pubTwitter"> 𝕏 Twitter</label>
@@ -366,7 +372,18 @@ async function handleLogin(e){e.preventDefault();const p=document.getElementById
 function updatePreview(){
   const title=document.getElementById('title').value||'Title preview';const content=document.getElementById('content').value||'';const hashtags=document.getElementById('hashtags').value||'';const customMsg=document.getElementById('customMessage').value||'';const imgFile=document.getElementById('image').files[0];
   document.getElementById('previewTitle').textContent=title;document.getElementById('previewDesc').textContent=content.replace(/[#*\`>]/g,'').substring(0,150)||'Description preview...';document.getElementById('previewMsg').textContent=(customMsg||title)+' '+(hashtags||'');document.getElementById('socialPreview').style.display='block';
-  if(imgFile){const url=URL.createObjectURL(imgFile);document.getElementById('previewImage').style.display='block';document.getElementById('previewImage').style.backgroundImage='url('+url+')'}else{document.getElementById('previewImage').style.display='none'}
+  if(imgFile){const url=URL.createObjectURL(imgFile);document.getElementById('previewImage').style.display='block';document.getElementById('previewImage').style.backgroundImage='url('+url+')'}else if(!document.getElementById('previewImage').style.backgroundImage||document.getElementById('previewImage').style.backgroundImage==='none'){document.getElementById('previewImage').style.display='none'}
+}
+function importMD(){document.getElementById('mdFileInput').click()}
+function handleMDFile(e){const file=e.target.files[0];if(!file)return;const reader=new FileReader();reader.onload=function(ev){const text=ev.target.result;document.getElementById('content').value=text;const titleMatch=text.match(/^#\s+(.+)$/m);if(titleMatch)document.getElementById('title').value=titleMatch[1].trim();updatePreview()};reader.readAsText(file)}
+async function generateAISummary(){
+  const title=document.getElementById('title').value;const content=document.getElementById('content').value;
+  if(!title||!content){alert('Title and content required');return}
+  const statusEl=document.getElementById('publishStatus');statusEl.style.display='block';statusEl.textContent='Generating summary...';
+  const r=await fetch('/api/ai/summary',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify({title,content})});
+  if(r.ok){const d=await r.json();document.getElementById('customMessage').value=d.summary;updatePreview();statusEl.textContent='Summary generated!'}
+  else{const e=await r.json();statusEl.textContent='Error: '+(e.error||'Unknown')}
+  setTimeout(()=>{statusEl.style.display='none'},2500);
 }
 async function createPost(e){e.preventDefault();const editSlug=document.getElementById('editSlug').value;const title=document.getElementById('title').value;const content=document.getElementById('content').value;const hashtags=document.getElementById('hashtags').value;const customMsg=document.getElementById('customMessage').value;const imageFile=document.getElementById('image').files[0];const pubBluesky=document.getElementById('pubBluesky').checked;const pubTwitter=document.getElementById('pubTwitter').checked;const statusEl=document.getElementById('publishStatus');const btn=document.querySelector('button[type=submit]');const fd=new FormData();fd.append('title',title);fd.append('content',content);fd.append('hashtags',hashtags);if(imageFile)fd.append('image',imageFile);const url=editSlug?'/api/posts/'+editSlug:'/api/posts';const method=editSlug?'PUT':'POST';
 statusEl.style.display='block';btn.disabled=true;statusEl.textContent='Creating article...';
@@ -374,7 +391,7 @@ const r=await fetch(url,{method,headers:{'Authorization':'Bearer '+token},body:f
 for(const p of platforms){statusEl.textContent='Publishing to '+p+'...';await fetch('/api/publish',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify({postSlug:d.slug||editSlug,platforms:[p],message:customMsg||undefined})});}
 statusEl.textContent='Done!';const pubUrl=editSlug?'/post/'+editSlug:(d.public_url||'/post/'+d.slug);setTimeout(()=>{window.open(pubUrl,'_blank');statusEl.style.display='none';statusEl.textContent='';btn.disabled=false;document.getElementById('title').value='';document.getElementById('content').value='';document.getElementById('hashtags').value='';document.getElementById('customMessage').value='';document.getElementById('image').value='';document.getElementById('editSlug').value='';document.getElementById('socialPreview').style.display='none';btn.textContent='Publish'},800)}else{statusEl.textContent='Error: '+(await r.json()).error;btn.disabled=false}}
 `;
-  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Editor | MAB-MyBlog</title><style>:root{--bg:#0a0a0f;--surface:#1a1a2e;--border:#2a2a3e;--text:#e0e0e0;--text2:#888;--accent:#e94560;--radius:8px}body{font-family:-apple-system,sans-serif;background:var(--bg);color:var(--text);margin:0;min-height:100vh}.container{max-width:700px;margin:0 auto;padding:2rem}input,textarea{width:100%;padding:.75rem;margin:.5rem 0 1rem;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:var(--radius);font-family:inherit;box-sizing:border-box}textarea{resize:vertical;min-height:300px;font-family:monospace;font-size:.9rem}input[type="file"]{padding:.5rem;color:var(--text2)}button{background:var(--accent);color:#fff;border:none;padding:.75rem 2rem;border-radius:var(--radius);cursor:pointer;font-size:1rem}button:disabled{opacity:.5;cursor:not-allowed}button:hover:not(:disabled){background:#ff6b6b}.form-group{margin-bottom:1rem}.form-group label{display:block;margin-bottom:.25rem;font-weight:500;font-size:.9rem;color:var(--text)}.login-form{max-width:400px;margin:4rem auto}h1{color:var(--accent)}${sb.css}</style></head><body>${sb.html}<div class="container">${content}</div><script>${sb.js}${editorJS}</script></body></html>`;
+  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Editor | MAB-MyBlog</title><style>:root{--bg:#0a0a0f;--surface:#1a1a2e;--border:#2a2a3e;--text:#e0e0e0;--text2:#888;--accent:#e94560;--radius:8px}body{font-family:-apple-system,sans-serif;background:var(--bg);color:var(--text);margin:0;min-height:100vh}.container{max-width:700px;margin:0 auto;padding:2rem}input,textarea{width:100%;padding:.75rem;margin:.5rem 0 1rem;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:var(--radius);font-family:inherit;box-sizing:border-box}textarea{resize:vertical;min-height:300px;font-family:monospace;font-size:.9rem}button{background:var(--accent);color:#fff;border:none;padding:.75rem 2rem;border-radius:var(--radius);cursor:pointer;font-size:1rem}button:disabled{opacity:.5;cursor:not-allowed}button:hover:not(:disabled){background:#ff6b6b}.form-group{margin-bottom:1rem}.form-group label{display:block;margin-bottom:.25rem;font-weight:500;font-size:.9rem;color:var(--text)}.login-form{max-width:400px;margin:4rem auto}h1{color:var(--accent)}${sb.css}</style></head><body>${sb.html}<div class="container">${content}</div><script>${sb.js}${editorJS}</script></body></html>`;
   return new Response(html, { headers: { 'Content-Type': 'text/html' } });
 }
 
@@ -410,6 +427,30 @@ export default {
     if (method === 'GET' && path === '/api/posts') { const { results } = await env.DB.prepare(`SELECT p.slug,p.title,p.author,p.status,p.created_at,v.excerpt,v.image_url,v.word_count,v.reading_time FROM posts p JOIN post_versions v ON p.slug=v.slug AND p.current_version=v.version WHERE p.status='published' ORDER BY p.created_at DESC`).all(); return json({ posts: results }); }
     if (method === 'GET' && path.match(/^\/api\/posts\/[a-z0-9-]+$/)) { const slug = path.split('/').pop(); const post = await env.DB.prepare(`SELECT p.*,v.article_url,v.image_url,v.meta_url,v.excerpt,v.word_count,v.reading_time FROM posts p JOIN post_versions v ON p.slug=v.slug AND p.current_version=v.version WHERE p.slug=? AND p.status='published'`).bind(slug).first(); if (!post) return json({ error: 'Not found' }, 404); try { const res = await fetch(post.article_url); const { body } = parseFrontmatter(await res.text()); return json({ slug: post.slug, title: post.title, author: post.author, content: body, excerpt: post.excerpt, image_url: post.image_url, word_count: post.word_count, reading_time: post.reading_time, created_at: post.created_at, version: post.current_version }); } catch { return json({ slug: post.slug, title: post.title, excerpt: post.excerpt }); } }
     if (method === 'POST' && path === '/api/auth/login') { const { password } = await request.json(); if (password !== env.ADMIN_PASSWORD) return json({ error: 'Unauthorized' }, 401); return json({ success: true, token: await generateJWT(env) }); }
+    if (method === 'POST' && path === '/api/ai/summary') {
+      try {
+        const { title, content } = await request.json();
+        const text = `Title: ${title}\n\nContent: ${content.substring(0, 1500)}`;
+        let summary = null;
+        try {
+          const result = await env.AI.run('@cf/facebook/bart-large-cnn', { input_text: text, max_length: 280 });
+          if (result?.summary) summary = result.summary.trim();
+        } catch (e) { console.error('BART failed:', e); }
+        if (!summary) {
+          try {
+            const result = await env.AI.run('@cf/meta/llama-3.2-3b-instruct', {
+              messages: [
+                { role: 'system', content: 'Generate a social media post with title and summary. Max 280 chars. Output only the post.' },
+                { role: 'user', content: text }
+              ]
+            });
+            if (result?.response) summary = result.response.trim();
+          } catch (e) { console.error('LLM fallback failed:', e); }
+        }
+        if (!summary) return json({ error: 'No AI model available' }, 500);
+        return json({ summary: summary.substring(0, 280) });
+      } catch (e) { return json({ error: e.message }, 500); }
+    }
     if (method === 'GET' && path === '/api/stats/refresh') {
       const days = parseInt(url.searchParams.get('days') || '1'); const months = parseInt(url.searchParams.get('months') || '0'); const years = parseInt(url.searchParams.get('years') || '0');
       const sinceDate = new Date(); sinceDate.setDate(sinceDate.getDate() - days); sinceDate.setMonth(sinceDate.getMonth() - months); sinceDate.setFullYear(sinceDate.getFullYear() - years);

@@ -15,3 +15,6 @@ crons = ["* * * * *"]
 BASE_URL = "https://mab-myblog.nocloudware.workers.dev"
 BLOG_NAME = "My Blog"
 BLOG_LANG = "en"
+
+[ai]
+binding = "AI"
